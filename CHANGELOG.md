@@ -8,6 +8,8 @@ All notable changes to rss-tui are recorded here. The format follows
 
 ### Added
 
+- The list takes mouse input: a click selects the row under the pointer, a
+  double click opens the article, and the wheel scrolls the focused pane.
 - `,` opens a settings menu for theme, refresh interval, notifications, passive
   items, and passive unread only. A change applies live and is written to
   `config.yaml` immediately, keeping comments, the feed block, and a

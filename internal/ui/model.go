@@ -117,6 +117,9 @@ type Model struct {
 	overlay    overlay
 
 	settingsCursor int
+
+	lastClick              time.Time
+	lastClickX, lastClickY int
 }
 
 type previewCache struct {

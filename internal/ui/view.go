@@ -69,6 +69,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
+
 	case loadedMsg:
 		first := !m.ready
 		m.ready = true
@@ -254,20 +257,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "o":
 		return m, m.openInBrowser()
 	case "enter":
-		if m.focus == focusPreview {
-			m.focus = focusList
-			return m, nil
-		}
-		a := m.selected()
-		if a == nil {
-			return m, nil
-		}
-		m.focus = focusPreview
-		m.previewScroll = 0
-		if !a.Read {
-			return m, m.markRead([]int64{a.ID}, true)
-		}
-		return m, nil
+		return m, m.openSelected()
 	case " ":
 		a := m.selected()
 		if a == nil {
@@ -342,6 +332,115 @@ func (m Model) handleSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.changeSetting(1)
 	}
 	return m, nil
+}
+
+// openSelected mirrors Enter: from the list it opens the selected article in
+// the preview and marks it read; from the preview it returns to the list.
+func (m *Model) openSelected() tea.Cmd {
+	if m.focus == focusPreview {
+		m.focus = focusList
+		return nil
+	}
+	a := m.selected()
+	if a == nil {
+		return nil
+	}
+	m.focus = focusPreview
+	m.previewScroll = 0
+	if !a.Read {
+		return m.markRead([]int64{a.ID}, true)
+	}
+	return nil
+}
+
+// doubleClickWindow is how close two clicks must be to count as a double click.
+// It is a var so tests can pin the threshold.
+var doubleClickWindow = 400 * time.Millisecond
+
+// handleMouse maps clicks and wheel motion onto the panes. Overlays and the
+// pre-first-load screen ignore the mouse.
+func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	ev := tea.MouseEvent(msg)
+	if !m.ready || m.overlay != overlayNone || m.searching {
+		return m, nil
+	}
+	if ev.IsWheel() {
+		return m.wheel(ev.Button)
+	}
+	if ev.Action != tea.MouseActionPress || ev.Button != tea.MouseButtonLeft {
+		return m, nil
+	}
+	if ev.Y < 0 || ev.Y >= m.paneHeight() {
+		return m, nil
+	}
+
+	now := time.Now()
+	double := !m.lastClick.IsZero() &&
+		ev.X == m.lastClickX && ev.Y == m.lastClickY &&
+		now.Sub(m.lastClick) < doubleClickWindow
+	m.lastClick, m.lastClickX, m.lastClickY = now, ev.X, ev.Y
+
+	if m.inList(ev.X) {
+		m.focus = focusList
+		if idx, ok := m.rowAt(ev.Y); ok {
+			m.cursor = idx
+			m.previewScroll = 0
+			if double {
+				return m, m.openSelected()
+			}
+		}
+		return m, nil
+	}
+	if !m.singlePane() || m.focus == focusPreview {
+		m.focus = focusPreview
+	}
+	return m, nil
+}
+
+// wheel scrolls the pane that has focus. One notch moves three rows.
+func (m Model) wheel(button tea.MouseButton) (tea.Model, tea.Cmd) {
+	delta := 3
+	if button == tea.MouseButtonWheelUp {
+		delta = -3
+	}
+	if m.focus == focusPreview {
+		m.scrollPreview(delta)
+		return m, nil
+	}
+	m.moveCursor(delta)
+	return m, nil
+}
+
+// inList reports whether screen column x sits in the list pane.
+func (m Model) inList(x int) bool {
+	if x < 0 || x >= m.leftWidth() {
+		return false
+	}
+	return !m.singlePane() || m.focus != focusPreview
+}
+
+// rowAt maps a screen row to a visible article index.
+func (m Model) rowAt(y int) (int, bool) {
+	// One border row, the header, and one blank row precede the articles.
+	row := y - 3
+	if row < 0 || row >= m.listVisibleRows() {
+		return 0, false
+	}
+	idx := m.offset + row
+	if idx >= len(m.visible) {
+		return 0, false
+	}
+	return idx, true
+}
+
+// listVisibleRows is the number of article rows the list renders, matching
+// renderList.
+func (m Model) listVisibleRows() int {
+	rows := m.paneHeight() - 4
+	if rows < 0 {
+		rows = 0
+	}
+	return rows
 }
 
 func (m Model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -767,6 +866,7 @@ func (m Model) viewHelp(st styles) string {
 		{"t", "cycle colour theme"},
 		{",", "settings menu"},
 		{"tab", "single-pane toggle"},
+		{"mouse", "click select · wheel scroll"},
 		{"F", "feed health"},
 		{"e", "feed error details"},
 		{"?", "close this help"},
