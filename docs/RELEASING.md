@@ -13,9 +13,14 @@ One procedure, one home. The README stays an overview.
 A release build comes from a clean checkout of the tag. A `-dirty` suffix means
 the binary does not match the tag and must not be published.
 
+Stamping needs the tags in the local clone. A fresh clone or a CI checkout
+without `fetch-depth: 0` sees no tags, so the version falls back to the commit
+hash. Run `git fetch --tags` before you build from a tag.
+
 ## Procedure
 
-1. Confirm CI is green on `main`.
+1. Confirm CI is green on `main`. `make check` is the local mirror of the CI
+   job (gofmt check, vet, tests, race detector, build).
 2. Open a `docs/` or `chore/` branch and cut the changelog: retitle
    `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD`, then add a fresh
    `## [Unreleased]` above it.
@@ -35,9 +40,11 @@ the binary does not match the tag and must not be published.
    gh release create vX.Y.Z --title "rss-tui X.Y.Z" --generate-notes
    ```
 
-6. Verify the stamped version from the tag:
+6. Verify the stamped version from the tag. The checkout must be clean, or the
+   suffix reads `-dirty`:
 
    ```sh
+   git fetch --tags
    git switch --detach vX.Y.Z
    make build
    ./rss-tui --version   # rss-tui vX.Y.Z
