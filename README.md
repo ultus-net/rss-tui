@@ -1,5 +1,7 @@
 # rss-tui
 
+[![CI](https://github.com/ultus-net/rss-tui/actions/workflows/ci.yml/badge.svg)](https://github.com/ultus-net/rss-tui/actions/workflows/ci.yml)
+
 A fast, low-glare RSS/Atom reader for a dedicated terminal window or tmux pane.
 
 Two modes: a full-screen Bubble Tea reader, and a passive ticker that redraws a
@@ -8,8 +10,9 @@ the last poll survive restarts.
 
 ## Status
 
-Working v0.1. `go test ./...`, `go vet ./...` and `gofmt -l` are clean. The
-interactive UI and passive mode were smoke-tested in tmux against live feeds.
+Working v0.2. CI runs gofmt, `go vet`, the tests, the race detector, and a
+build on every pull request. The interactive UI and passive mode were
+smoke-tested in tmux against live feeds.
 
 ## Requirements
 
@@ -38,10 +41,13 @@ On first run rss-tui writes a sample config with four tech/news feeds, fetches
 them, and caches the articles. Delete the config to regenerate the sample.
 
 ```sh
-make build   # ./rss-tui
+make build   # ./rss-tui, version stamped from git describe
 make test    # offline test suite
-make check   # gofmt + vet + test
+make check   # gofmt check + vet + tests + race detector + build
 ```
+
+`./rss-tui --version` prints the stamped version. A plain `go build` leaves it
+as `dev`.
 
 ## Modes
 
@@ -247,10 +253,18 @@ The suite is offline. Feed parsing and timeouts run against `httptest` servers;
 the store uses a temporary SQLite file.
 
 ```sh
+make check    # gofmt check, vet, tests, race detector, build
+```
+
+Individual steps:
+
+```sh
 go test ./...
 go vet ./...
 gofmt -l ./cmd ./internal   # empty when formatted
 ```
+
+Release steps live in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Limitations
 

@@ -1,0 +1,24 @@
+name: PR branch name
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  prefix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the head branch prefix
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          case "$HEAD_REF" in
+            feature/*|fix/*|chore/*|docs/*|experiment/*|hotfix/*|refactor/*)
+              echo "branch '$HEAD_REF' is allowed" ;;
+            *)
+              echo "branch '$HEAD_REF' must start with feature/, fix/, chore/, docs/, experiment/, hotfix/, or refactor/"
+              exit 1 ;;
+          esac

@@ -6,6 +6,8 @@ All notable changes to rss-tui are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-12
+
 ### Added
 
 - `n` / `N` jump to the next or previous unread article, the triage keys a
@@ -21,6 +23,9 @@ All notable changes to rss-tui are recorded here. The format follows
   readers. Import merges by URL by default (`--replace` starts clean), backs up
   the previous config to `config.yaml.bak`, and writes atomically.
 - `passive_unread_only` config key, so the ticker can show only what is unread.
+- GitHub Actions CI that runs gofmt, `go vet`, tests, the race detector, and a
+  build, plus a pull-request gate on branch prefixes. `make build` stamps the
+  version from `git describe`, and `make check` runs the full local gate.
 
 ### Changed
 
