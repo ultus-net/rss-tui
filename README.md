@@ -86,7 +86,7 @@ rss-tui · 14:02 · 3 new · 12 unread · 4 feeds · refresh 10m
 | `y` / `Y` | Copy the link / copy a markdown link to the terminal clipboard |
 | `r` | Refresh every feed now |
 | `u` | Toggle All / Unread-only filter |
-| `/` | Live fuzzy search over visible headlines |
+| `/` | Live search: fuzzy over headlines and feed names, plus article bodies |
 | `m` | Mark every visible article read |
 | `c` | Cycle category filter: All → each category → All |
 | `t` | Cycle colour theme; saved to `config.yaml` |
@@ -98,6 +98,11 @@ rss-tui · 14:02 · 3 new · 12 unread · 4 feeds · refresh 10m
 | `q` / `Ctrl+c` | Quit |
 
 Search: typing filters as you type, `Enter` keeps the filter, `Esc` clears it.
+Headlines and feed names match fuzzily. Body text matches through the SQLite
+full-text index, so a word that appears only inside an article still finds it.
+Body matches arrive one keystroke behind the headline result; a one-character
+query stays headline-only.
+
 Under the unread-only filter an article you just read stays visible until the
 next refresh, so the cursor does not jump out from under you.
 
@@ -294,7 +299,8 @@ Release steps live in [docs/RELEASING.md](docs/RELEASING.md).
 ## Limitations
 
 - No article images, only text.
-- No full-text search over article bodies; `/` matches headlines and feed names.
+- Search reads the cached article text. An article past the per-feed cap has
+  been pruned, so its body is no longer searchable.
 - Passive mode polls at `refresh_interval`; it does not stream.
 - `--once` is a cron-shaped entry point, not a daemon.
 - Windows builds compile, but only Linux and macOS are smoke-tested.

@@ -10,11 +10,12 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 3
+const schemaVersion = 4
 
 const schema = `
 CREATE TABLE IF NOT EXISTS feeds (
@@ -52,6 +53,23 @@ CREATE TABLE IF NOT EXISTS meta (
 	key   TEXT PRIMARY KEY,
 	value TEXT NOT NULL
 );
+
+CREATE VIRTUAL TABLE IF NOT EXISTS articles_fts USING fts5(
+	title, content, content='articles', content_rowid='id'
+);
+
+CREATE TRIGGER IF NOT EXISTS articles_fts_ai AFTER INSERT ON articles BEGIN
+	INSERT INTO articles_fts(rowid, title, content) VALUES (new.id, new.title, new.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS articles_fts_ad AFTER DELETE ON articles BEGIN
+	INSERT INTO articles_fts(articles_fts, rowid, title, content) VALUES ('delete', old.id, old.title, old.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS articles_fts_au AFTER UPDATE OF title, content ON articles BEGIN
+	INSERT INTO articles_fts(articles_fts, rowid, title, content) VALUES ('delete', old.id, old.title, old.content);
+	INSERT INTO articles_fts(rowid, title, content) VALUES (new.id, new.title, new.content);
+END;
 `
 
 // migrations[i] upgrades a database at version i+1 to version i+2.
@@ -64,6 +82,23 @@ var migrations = [][]string{
 	{
 		`ALTER TABLE articles ADD COLUMN starred INTEGER NOT NULL DEFAULT 0`,
 		`CREATE INDEX IF NOT EXISTS idx_articles_starred ON articles(starred, published DESC)`,
+	},
+	{
+		`CREATE VIRTUAL TABLE IF NOT EXISTS articles_fts USING fts5(
+			title, content, content='articles', content_rowid='id'
+		)`,
+		`CREATE TRIGGER IF NOT EXISTS articles_fts_ai AFTER INSERT ON articles BEGIN
+			INSERT INTO articles_fts(rowid, title, content) VALUES (new.id, new.title, new.content);
+		END`,
+		`CREATE TRIGGER IF NOT EXISTS articles_fts_ad AFTER DELETE ON articles BEGIN
+			INSERT INTO articles_fts(articles_fts, rowid, title, content) VALUES ('delete', old.id, old.title, old.content);
+		END`,
+		`CREATE TRIGGER IF NOT EXISTS articles_fts_au AFTER UPDATE OF title, content ON articles BEGIN
+			INSERT INTO articles_fts(articles_fts, rowid, title, content) VALUES ('delete', old.id, old.title, old.content);
+			INSERT INTO articles_fts(rowid, title, content) VALUES (new.id, new.title, new.content);
+		END`,
+		`INSERT INTO articles_fts(rowid, title, content)
+			SELECT id, title, content FROM articles`,
 	},
 }
 
@@ -399,6 +434,66 @@ func (s *Store) Articles(ctx context.Context, opts ListOptions) ([]Article, erro
 		return nil, fmt.Errorf("store: iterate articles: %w", err)
 	}
 	return out, nil
+}
+
+// SearchBodies returns the IDs of cached articles whose title or body matches
+// the free-text query, best matches first. A query with no usable term returns
+// no IDs. A non-positive limit uses searchLimit.
+func (s *Store) SearchBodies(ctx context.Context, query string, limit int) ([]int64, error) {
+	match := ftsQuery(query)
+	if match == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = searchLimit
+	}
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT rowid FROM articles_fts WHERE articles_fts MATCH ? ORDER BY rank LIMIT ?",
+		match, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: search bodies: %w", err)
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("store: scan search hit: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate search hits: %w", err)
+	}
+	return ids, nil
+}
+
+const (
+	searchLimit = 500
+	maxFTSTerms = 8
+)
+
+// ftsQuery turns free text into a safe FTS5 MATCH expression. Every term is
+// quoted, so punctuation and FTS operators in the input cannot change the
+// query shape, and the last term gets a prefix star so live typing matches as
+// it grows.
+func ftsQuery(query string) string {
+	terms := strings.Fields(query)
+	if len(terms) > maxFTSTerms {
+		terms = terms[:maxFTSTerms]
+	}
+	quoted := make([]string, 0, len(terms))
+	for _, term := range terms {
+		if strings.IndexFunc(term, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }) < 0 {
+			continue
+		}
+		quoted = append(quoted, `"`+strings.ReplaceAll(term, `"`, `""`)+`"`)
+	}
+	if len(quoted) == 0 {
+		return ""
+	}
+	quoted[len(quoted)-1] += "*"
+	return strings.Join(quoted, " ")
 }
 
 // MarkRead sets read state for the given article IDs.
