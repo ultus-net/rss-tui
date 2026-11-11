@@ -1,0 +1,6 @@
+/rss-tui
+/dist/
+/.tmp/
+*.db
+*.db-wal
+*.db-shm
