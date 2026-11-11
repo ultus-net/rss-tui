@@ -71,7 +71,7 @@ rss-tui · 14:02 · 3 new · 12 unread · 4 feeds · refresh 10m
 | `g` / `G` | First / last article (or top / bottom of preview) |
 | `Ctrl+d` / `Ctrl+u` | Half page down / up (also `PgDn` / `PgUp`) |
 | `h` / `l` | Focus list / preview pane (also `←` / `→`) |
-| `Enter` | Focus preview and mark the article read; press again to return |
+| `Enter` | Open the preview and mark the article read; `Enter` again or `Esc` returns to the list |
 | `Space` | Toggle read / unread without leaving the list |
 | `o` | Open the article link in the configured browser |
 | `r` | Refresh every feed now |

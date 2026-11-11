@@ -62,6 +62,7 @@ func RunPassive(ctx context.Context, deps Deps, opts PassiveOptions) error {
 	color := opts.Color && tty && os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb"
 	interactive := tty && !opts.Once
 	renderer := &blockRenderer{out: out, interactive: interactive}
+	defer renderer.Finish()
 	once := opts.Once || !tty
 
 	for {
@@ -139,7 +140,6 @@ func RunPassive(ctx context.Context, deps Deps, opts PassiveOptions) error {
 		}
 		select {
 		case <-ctx.Done():
-			renderer.Finish()
 			return nil
 		case <-time.After(deps.Cfg.RefreshInterval.Std()):
 		}
@@ -196,7 +196,8 @@ func (r *blockRenderer) Render(lines []string) {
 	r.prev = len(lines)
 }
 
-// Finish leaves the terminal on a clean line after the block.
+// Finish leaves the terminal on a clean line after the block. Shrinking
+// redraws already cleared any extra rows; this only moves the cursor.
 func (r *blockRenderer) Finish() {
 	if r.prev > 0 {
 		fmt.Fprint(r.out, "\n")

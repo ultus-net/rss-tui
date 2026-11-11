@@ -142,7 +142,9 @@ behind. Line width is capped at `terminalWidth - 1`; writing the last cell would
 trigger a wrap and desynchronise the cursor arithmetic.
 
 The block is capped at `height - 1` lines so a tall block cannot scroll the
-terminal out from under the cursor. `SIGINT`/`SIGTERM` cancel the poll context
+terminal out from under the cursor. When a redraw shrinks the block, the extra
+rows are cleared in the same pass, so no stale headline can survive below it.
+`Finish` only moves to a clean line on exit; it never erases the final block. `SIGINT`/`SIGTERM` cancel the poll context
 and leave a clean line. Non-TTY output skips every escape sequence and prints
 once.
 
@@ -152,7 +154,7 @@ once.
 | --- | --- |
 | Feed fetch | Per-feed timeout, isolated error, other feeds continue, retry next tick |
 | Feed parse | Same; error recorded with the feed title |
-| Cache write | Transaction per feed; error shown in status and `e`; next poll retries |
+| Cache write | One transaction per feed; error shown in status and `e`; next poll retries. A later prune or meta failure does not roll back articles already committed. |
 | Browser launch | `tea.ExecProcess` releases the terminal; failure shown in status |
 | Notification | Best effort, 5s timeout, missing binary ignored |
 | Theme persist | Best effort; failure shown, theme still applied for the session |
