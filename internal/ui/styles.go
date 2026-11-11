@@ -119,6 +119,19 @@ func (s styles) rowDot(read, selected bool) lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(lipgloss.Color(color))
 }
 
+func (s styles) rowAge(read, selected bool) lipgloss.Style {
+	color := s.p.Muted
+	if read {
+		color = s.p.Faint
+	}
+	if selected {
+		return lipgloss.NewStyle().
+			Background(lipgloss.Color(s.p.SelectionBg)).
+			Foreground(lipgloss.Color(color))
+	}
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(color))
+}
+
 func (s styles) rowTag(selected bool) lipgloss.Style {
 	if selected {
 		return lipgloss.NewStyle().

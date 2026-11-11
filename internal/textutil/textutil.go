@@ -201,29 +201,71 @@ func Summary(md string, max int) string {
 	return Truncate(OneLine(MarkdownToText(md)), max)
 }
 
+// Age is the compact age stamp used by the list row. It shares the thresholds
+// in ageBucket with RelativeTime and drops the " ago" suffix, because a row has
+// fewer columns to spare. A date falls back to "2 Jan 06" past this year.
+func Age(t, now time.Time) string {
+	d, ok := elapsed(t, now)
+	if !ok {
+		return ""
+	}
+	if n, unit, ok := ageBucket(d); ok {
+		if unit == 's' {
+			return "now"
+		}
+		return fmt.Sprintf("%d%c", n, unit)
+	}
+	if t.Year() == now.Year() {
+		return t.Format("2 Jan")
+	}
+	return t.Format("2 Jan 06")
+}
+
 // RelativeTime formats t relative to now for status bars and lists.
 func RelativeTime(t, now time.Time) string {
-	if t.IsZero() {
+	d, ok := elapsed(t, now)
+	if !ok {
 		return ""
+	}
+	if n, unit, ok := ageBucket(d); ok {
+		if unit == 's' {
+			return "just now"
+		}
+		return fmt.Sprintf("%d%c ago", n, unit)
+	}
+	if t.Year() == now.Year() {
+		return t.Format("2 Jan")
+	}
+	return t.Format("2 Jan 2006")
+}
+
+// elapsed clamps a stamp into a non-negative distance from now. ok is false for
+// a zero stamp, which has no age.
+func elapsed(t, now time.Time) (time.Duration, bool) {
+	if t.IsZero() {
+		return 0, false
 	}
 	d := now.Sub(t)
 	if d < 0 {
 		d = 0
 	}
+	return d, true
+}
+
+// ageBucket classifies a distance as a compact count and unit. ok is false when
+// the stamp is old enough to print as a calendar date instead.
+func ageBucket(d time.Duration) (n int, unit byte, ok bool) {
 	switch {
 	case d < 45*time.Second:
-		return "just now"
+		return 0, 's', true
 	case d < 90*time.Minute:
-		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+		return int(d.Minutes()), 'm', true
 	case d < 36*time.Hour:
-		return fmt.Sprintf("%dh ago", int(d.Hours()))
+		return int(d.Hours()), 'h', true
 	case d < 7*24*time.Hour:
-		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
-	case t.Year() == now.Year():
-		return t.Format("2 Jan")
-	default:
-		return t.Format("2 Jan 2006")
+		return int(d.Hours() / 24), 'd', true
 	}
+	return 0, 0, false
 }
 
 // Clock is the hh:mm stamp used by passive mode.

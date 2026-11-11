@@ -18,6 +18,7 @@ import (
 	"github.com/ultus-net/rss-tui/internal/config"
 	"github.com/ultus-net/rss-tui/internal/feed"
 	"github.com/ultus-net/rss-tui/internal/store"
+	"github.com/ultus-net/rss-tui/internal/textutil"
 	"github.com/ultus-net/rss-tui/internal/theme"
 )
 
@@ -207,6 +208,53 @@ func TestStarredFilterComposes(t *testing.T) {
 	m.unreadOnly = false
 	if text := m.emptyText(); text != "no starred articles" {
 		t.Fatalf("starred empty text = %q", text)
+	}
+}
+
+func TestRowShowsAge(t *testing.T) {
+	st := newStyles(theme.Get("nord"))
+	a := store.Article{
+		Title: "Headline", FeedTitle: "Example", Published: time.Now().Add(-3 * time.Hour),
+	}
+	for _, width := range []int{60, 80, 120} {
+		line := renderRow(a, width, false, st)
+		if !strings.Contains(line, "3h") {
+			t.Fatalf("width %d: age missing from %q", width, line)
+		}
+		if got := ansi.StringWidth(line); got != width {
+			t.Fatalf("width %d: rendered %d columns: %q", width, got, line)
+		}
+	}
+	for _, width := range []int{20, 40, 59} {
+		line := renderRow(a, width, false, st)
+		if strings.Contains(line, "3h") {
+			t.Fatalf("width %d: age crowds a narrow row: %q", width, line)
+		}
+		if got := ansi.StringWidth(line); got != width {
+			t.Fatalf("width %d: rendered %d columns: %q", width, got, line)
+		}
+	}
+
+	// At the cutoff the age must not displace the truncated feed tag.
+	long := a
+	long.FeedTitle = "A very long feed title that must be truncated"
+	line := ansi.Strip(renderRow(long, rowAgeMinWidth, false, st))
+	tag := textutil.Truncate(long.FeedTitle, 16)
+	if !strings.Contains(line, "3h") || !strings.Contains(line, tag) {
+		t.Fatalf("cutoff row lost the age or the tag %q: %q", tag, line)
+	}
+
+	// Every width above the cutoff composes to exactly the pane width, even
+	// with a long headline and a long feed title.
+	long.Title = strings.Repeat("Headline ", 20)
+	for width := rowAgeMinWidth; width <= 200; width++ {
+		line := renderRow(long, width, false, st)
+		if !strings.Contains(line, "3h") {
+			t.Fatalf("width %d: age missing", width)
+		}
+		if got := ansi.StringWidth(line); got != width {
+			t.Fatalf("width %d: rendered %d columns", width, got)
+		}
 	}
 }
 
