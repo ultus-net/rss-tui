@@ -89,7 +89,8 @@ rss-tui · 14:02 · 3 new · 12 unread · 4 feeds · refresh 10m
 | `/` | Live fuzzy search over visible headlines |
 | `m` | Mark every visible article read |
 | `c` | Cycle category filter: All → each category → All |
-| `t` | Cycle colour theme; the choice is remembered |
+| `t` | Cycle colour theme; saved to `config.yaml` |
+| `,` | Settings menu: theme, refresh interval, notifications, passive rows |
 | `Tab` | Force single-pane mode at any width |
 | `F` | Feed health: counts, last poll, and last error per feed |
 | `e` | Show feed error details, including errors from earlier runs |
@@ -158,6 +159,13 @@ feeds:
   that answers `304 Not Modified` costs one small response and no parse.
 - Removing a feed from config drops its cached articles and read state on the
   next start. The config file is the source of truth for subscriptions.
+- `,` opens the settings menu. A change applies live and is written to
+  `config.yaml` immediately: comments and the feed block are kept, and the
+  previous file stays at `config.yaml.bak`. Editing feeds remains a file job and
+  `import-opml`.
+- The YAML `theme` is authoritative. On the first run of this version, if the
+  file still holds the default theme, a theme left in SQLite by an older build is
+  written into `config.yaml`. The old key is dropped either way.
 
 ### OPML import and export
 
@@ -184,7 +192,8 @@ of truth.
 
 ### Themes
 
-Six IDE palettes ship, selected by `theme` or cycled with `t`:
+Six IDE palettes ship, selected by `theme`, rotated in the settings menu, or
+cycled with `t`:
 
 | Name | Palette |
 | --- | --- |
@@ -222,7 +231,7 @@ missing notification daemon is ignored rather than reported as an error.
 | Path | Contents |
 | --- | --- |
 | `~/.config/rss-tui/config.yaml` | Feeds, categories, intervals, theme, browser |
-| `~/.local/share/rss-tui/state.db` | SQLite cache: articles, read state, feed errors, theme choice, last poll |
+| `~/.local/share/rss-tui/state.db` | SQLite cache: articles, read state, feed errors, last poll |
 
 `XDG_CONFIG_HOME` and `XDG_DATA_HOME` are honoured. SQLite runs in WAL mode with
 a single connection, so the UI and background polls never hold a write lock

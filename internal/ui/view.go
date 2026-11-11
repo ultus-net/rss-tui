@@ -12,7 +12,6 @@ import (
 
 	"github.com/ultus-net/rss-tui/internal/store"
 	"github.com/ultus-net/rss-tui/internal/textutil"
-	"github.com/ultus-net/rss-tui/internal/theme"
 )
 
 type loadedMsg struct {
@@ -20,7 +19,6 @@ type loadedMsg struct {
 	feeds       []store.Feed
 	feedErrors  []feedError
 	lastUpdated time.Time
-	themeName   string
 	err         error
 }
 
@@ -40,7 +38,7 @@ type statusClearMsg struct{ seq int }
 
 type browserDoneMsg struct{ err error }
 
-type themeSavedMsg struct{ err error }
+type settingsSavedMsg struct{ err error }
 
 type yankDoneMsg struct {
 	label string
@@ -84,11 +82,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if !msg.lastUpdated.IsZero() {
 			m.lastUpdated = msg.lastUpdated
-		}
-		if msg.themeName != "" && !m.deps.ThemeExplicit {
-			if p, ok := theme.Resolve(msg.themeName); ok {
-				m.theme = p
-			}
 		}
 		m.recompute()
 		return m, nil
@@ -139,9 +132,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case themeSavedMsg:
+	case settingsSavedMsg:
 		if msg.err != nil {
-			return m, m.flash("could not save theme: " + msg.err.Error())
+			return m, m.flash("could not save settings: " + msg.err.Error())
 		}
 		return m, nil
 
@@ -165,6 +158,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key == "ctrl+c" {
 		return m, tea.Quit
 	}
+	if m.overlay == overlaySettings {
+		return m.handleSettingsKey(msg)
+	}
 	if m.overlay != overlayNone {
 		m.overlay = overlayNone
 		return m, nil
@@ -178,6 +174,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "?":
 		m.overlay = overlayHelp
+	case ",":
+		m.overlay = overlaySettings
+		m.settingsCursor = 0
 	case "e":
 		if len(m.feedErrors) == 0 {
 			return m, m.flash("no feed errors")
@@ -323,6 +322,28 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleSettingsKey drives the settings overlay. Every value change persists
+// immediately; esc or q closes without reverting what was already saved.
+func (m Model) handleSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q", ",":
+		m.overlay = overlayNone
+	case "j", "down":
+		m.settingsCursor = (m.settingsCursor + 1) % settingCount
+	case "k", "up":
+		m.settingsCursor = (m.settingsCursor - 1 + settingCount) % settingCount
+	case "g", "home":
+		m.settingsCursor = 0
+	case "G", "end":
+		m.settingsCursor = settingCount - 1
+	case "h", "left":
+		return m, m.changeSetting(-1)
+	case "l", "right", "enter", " ":
+		return m, m.changeSetting(1)
+	}
+	return m, nil
+}
+
 func (m Model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
@@ -425,6 +446,8 @@ func (m Model) View() string {
 		return m.viewErrors(st)
 	case overlayFeeds:
 		return m.viewFeeds(st)
+	case overlaySettings:
+		return m.viewSettings(st)
 	}
 
 	bodyHeight := m.paneHeight()
@@ -742,6 +765,7 @@ func (m Model) viewHelp(st styles) string {
 		{"m", "mark visible as read"},
 		{"c", "cycle category"},
 		{"t", "cycle colour theme"},
+		{",", "settings menu"},
 		{"tab", "single-pane toggle"},
 		{"F", "feed health"},
 		{"e", "feed error details"},
@@ -845,6 +869,56 @@ func (m Model) viewFeeds(st styles) string {
 		b.WriteString("\n")
 	}
 	b.WriteString(st.faint().Render("any key to close"))
+	box := st.helpBox().Render(strings.TrimRight(b.String(), "\n"))
+	box = fitHeight(box, m.height-1)
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
+// viewSettings renders the settings overlay. Values are read from the live
+// config so every change shows up immediately.
+func (m Model) viewSettings(st styles) string {
+	cfg := m.deps.Cfg
+	rows := [][2]string{
+		{"theme", m.theme.Label},
+		{"refresh", cfg.RefreshInterval.Std().String()},
+		{"notifications", onOff(cfg.Notifications)},
+		{"passive items", strconv.Itoa(cfg.PassiveItems)},
+		{"passive unread only", onOff(cfg.PassiveUnreadOnly)},
+	}
+	boxW := 60
+	if m.width-6 < boxW {
+		boxW = m.width - 6
+	}
+	if boxW < 34 {
+		boxW = 34
+	}
+	textW := boxW - 4
+	labelW := 20
+	if textW-labelW < 8 {
+		labelW = textW - 8
+	}
+	var b strings.Builder
+	b.WriteString(st.title().Render("settings"))
+	b.WriteString("\n")
+	b.WriteString(st.faint().Render("j/k move · h/l change · esc close"))
+	b.WriteString("\n\n")
+	for i, row := range rows {
+		marker := "  "
+		if i == m.settingsCursor {
+			marker = "› "
+		}
+		label := marker + padRight(row[0], labelW)
+		if i == m.settingsCursor {
+			line := label + row[1]
+			b.WriteString(st.rowTitle(false, true).Render(padRight(textutil.Truncate(line, textW), textW)))
+		} else {
+			b.WriteString(st.faint().Render(label))
+			b.WriteString(st.meta().Render(textutil.Truncate(row[1], textW-labelW)))
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
+	b.WriteString(st.faint().Render("saved to config.yaml on every change"))
 	box := st.helpBox().Render(strings.TrimRight(b.String(), "\n"))
 	box = fitHeight(box, m.height-1)
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)

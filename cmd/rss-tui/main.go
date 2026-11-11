@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -81,13 +82,6 @@ func run() error {
 		themeName = *themeFlag
 		explicit = true
 	}
-	palette, known := theme.Resolve(themeName)
-	if !known {
-		if explicit {
-			return fmt.Errorf("unknown theme %q (available: %s)", themeName, strings.Join(theme.Names(), ", "))
-		}
-		fmt.Fprintf(os.Stderr, "rss-tui: unknown theme %q, using %s\n", themeName, palette.Name)
-	}
 
 	dataDir, err := config.DataDir()
 	if err != nil {
@@ -98,20 +92,34 @@ func run() error {
 		return err
 	}
 	defer st.Close()
+
+	// Older versions stored the theme in SQLite. Reconcile it into the YAML once
+	// so the config file is the single source of truth, then drop the stale key.
+	if adopted, ok := adoptLegacyTheme(st, cfg, path); ok && !explicit {
+		themeName = adopted
+	}
+
+	palette, known := theme.Resolve(themeName)
+	if !known {
+		if explicit {
+			return fmt.Errorf("unknown theme %q (available: %s)", themeName, strings.Join(theme.Names(), ", "))
+		}
+		fmt.Fprintf(os.Stderr, "rss-tui: unknown theme %q, using %s\n", themeName, palette.Name)
+	}
+
 	// The config file is the source of truth for subscriptions.
 	if err := st.PruneFeeds(context.Background(), cfg.URLs()); err != nil {
 		fmt.Fprintf(os.Stderr, "rss-tui: %v\n", err)
 	}
 
 	deps := ui.Deps{
-		Cfg:           cfg,
-		Store:         st,
-		Fetcher:       feed.New(feed.Options{Timeout: cfg.PerFeedTimeout.Std(), Workers: cfg.ConcurrentFetches}),
-		Notifier:      notify.New(cfg.Notifications),
-		Theme:         palette,
-		ThemeExplicit: explicit,
-		Browser:       cfg.Browser,
-		ConfigPath:    path,
+		Cfg:        cfg,
+		Store:      st,
+		Fetcher:    feed.New(feed.Options{Timeout: cfg.PerFeedTimeout.Std(), Workers: cfg.ConcurrentFetches}),
+		Notifier:   notify.New(cfg.Notifications),
+		Theme:      palette,
+		Browser:    cfg.Browser,
+		ConfigPath: path,
 	}
 
 	if *passive || *passiveShort || *once {
@@ -133,6 +141,37 @@ func resolveConfigPath(flagValue string) (string, error) {
 		return p, nil
 	}
 	return config.DefaultPath()
+}
+
+// adoptLegacyTheme reconciles a theme left in the SQLite meta table by an older
+// version. While the YAML still holds the default it adopts the stored theme
+// into cfg and saves it. Either way the stale key is deleted, so the YAML value
+// owns the choice from the next start.
+func adoptLegacyTheme(st *store.Store, cfg *config.Config, path string) (string, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stored, ok, err := st.Meta(ctx, "theme")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "rss-tui: read stored theme: %v\n", err)
+		return "", false
+	}
+	if !ok {
+		return "", false
+	}
+	adopted := ""
+	p, known := theme.Resolve(stored)
+	if known && cfg.Theme == config.DefaultTheme {
+		cfg.Theme = p.Name
+		if err := config.SavePreservingComments(path, cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "rss-tui: migrate theme: %v\n", err)
+			return "", false
+		}
+		adopted = p.Name
+	}
+	if err := st.DeleteMeta(ctx, "theme"); err != nil {
+		fmt.Fprintf(os.Stderr, "rss-tui: drop stored theme: %v\n", err)
+	}
+	return adopted, adopted != ""
 }
 
 func printUsage() {

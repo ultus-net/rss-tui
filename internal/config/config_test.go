@@ -190,6 +190,162 @@ func TestAddFeedsNormalisesAndDeduplicates(t *testing.T) {
 	}
 }
 
+func TestSavePreservingComments(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	original := `# keep this header
+refresh_interval: 10m # poll gap
+theme: nord
+
+# subscriptions
+feeds:
+  - url: https://example.com/rss
+    title: Example
+    category: tech
+`
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	cfg, _, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	cfg.Theme = "dracula"
+	cfg.RefreshInterval = Duration(30 * time.Minute)
+	cfg.Notifications = true
+	cfg.PassiveItems = 50
+	if err := SavePreservingComments(path, cfg); err != nil {
+		t.Fatalf("SavePreservingComments: %v", err)
+	}
+
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read saved: %v", err)
+	}
+	text := string(saved)
+	for _, want := range []string{
+		"# keep this header",
+		"# subscriptions",
+		"refresh_interval: 30m # poll gap",
+		"theme: dracula",
+		"notifications: true",
+		"passive_items: 50",
+		"- url: https://example.com/rss",
+		"    title: Example",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("saved config missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Index(text, "notifications:") > strings.Index(text, "feeds:") {
+		t.Fatalf("a missing key was appended after the feeds:\n%s", text)
+	}
+
+	backup, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatalf("backup missing: %v", err)
+	}
+	if !strings.Contains(string(backup), "theme: nord") {
+		t.Fatalf("backup is not the previous file:\n%s", backup)
+	}
+
+	reloaded, _, err := Load(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.Theme != "dracula" || reloaded.RefreshInterval.Std() != 30*time.Minute {
+		t.Fatalf("reloaded values = %q/%s", reloaded.Theme, reloaded.RefreshInterval)
+	}
+	if !reloaded.Notifications || reloaded.PassiveItems != 50 {
+		t.Fatalf("reloaded flags = %v/%d", reloaded.Notifications, reloaded.PassiveItems)
+	}
+	if len(reloaded.Feeds) != 1 || reloaded.Feeds[0].Title != "Example" {
+		t.Fatalf("feeds changed: %+v", reloaded.Feeds)
+	}
+}
+
+func TestSavePreservingCommentsCreatesMissingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "config.yaml")
+	cfg, _, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	cfg.Theme = "nord"
+	if err := SavePreservingComments(path, cfg); err != nil {
+		t.Fatalf("SavePreservingComments: %v", err)
+	}
+	reloaded, created, err := Load(path)
+	if err != nil || created {
+		t.Fatalf("reload: created=%v err=%v", created, err)
+	}
+	if reloaded.Theme != "nord" {
+		t.Fatalf("theme = %q", reloaded.Theme)
+	}
+}
+
+func TestSavePreservingCommentsKeepsFileMode(t *testing.T) {
+	for _, mode := range []os.FileMode{0o600, 0o640} {
+		t.Run(mode.String(), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte("theme: nord\nfeeds:\n  - url: https://example.com/rss\n"), mode); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			cfg, _, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			cfg.Theme = "dracula"
+			if err := SavePreservingComments(path, cfg); err != nil {
+				t.Fatalf("SavePreservingComments: %v", err)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("stat: %v", err)
+			}
+			if perm := info.Mode().Perm(); perm != mode {
+				t.Fatalf("config mode = %o, want %o", perm, mode)
+			}
+			backup, err := os.Stat(path + ".bak")
+			if err != nil {
+				t.Fatalf("stat backup: %v", err)
+			}
+			if perm := backup.Mode().Perm(); perm != 0o600 {
+				t.Fatalf("backup mode = %o, want 600", perm)
+			}
+		})
+	}
+}
+
+func TestSaveCreatesPrivateConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "config.yaml")
+	cfg, _, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove sample: %v", err)
+	}
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if _, created, err := Load(path); err != nil || created {
+		t.Fatalf("saved config unreadable: created=%v err=%v", created, err)
+	}
+	file, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := file.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("new config mode = %o, want 600", perm)
+	}
+	dir, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("stat dir: %v", err)
+	}
+	if perm := dir.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("config dir mode = %o, want 700", perm)
+	}
+}
+
 func TestSaveWritesBackupAndReloads(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	cfg, created, err := Load(path)

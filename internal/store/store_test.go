@@ -324,6 +324,15 @@ func TestMetaAndFeedErrors(t *testing.T) {
 	if v, ok, err := st.Meta(ctx, "theme"); err != nil || !ok || v != "dracula" {
 		t.Fatalf("meta = %q/%v/%v", v, ok, err)
 	}
+	if err := st.DeleteMeta(ctx, "theme"); err != nil {
+		t.Fatalf("DeleteMeta: %v", err)
+	}
+	if _, ok, err := st.Meta(ctx, "theme"); err != nil || ok {
+		t.Fatalf("deleted meta ok=%v err=%v", ok, err)
+	}
+	if err := st.DeleteMeta(ctx, "theme"); err != nil {
+		t.Fatalf("DeleteMeta missing: %v", err)
+	}
 
 	if err := st.RecordFeedError(ctx, "https://bad.example/rss", "Bad", "tech", "timed out"); err != nil {
 		t.Fatalf("RecordFeedError: %v", err)

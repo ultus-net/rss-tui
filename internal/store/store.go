@@ -513,6 +513,14 @@ func (s *Store) Meta(ctx context.Context, key string) (string, bool, error) {
 	return value, true, nil
 }
 
+// DeleteMeta removes a metadata value. Deleting a missing key is not an error.
+func (s *Store) DeleteMeta(ctx context.Context, key string) error {
+	if _, err := s.db.ExecContext(ctx, "DELETE FROM meta WHERE key = ?", key); err != nil {
+		return fmt.Errorf("store: delete meta %q: %w", key, err)
+	}
+	return nil
+}
+
 // SetMeta writes a metadata value.
 func (s *Store) SetMeta(ctx context.Context, key, value string) error {
 	if _, err := s.db.ExecContext(ctx,

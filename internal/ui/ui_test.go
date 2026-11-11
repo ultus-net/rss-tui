@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/ultus-net/rss-tui/internal/config"
 	"github.com/ultus-net/rss-tui/internal/feed"
+	"github.com/ultus-net/rss-tui/internal/notify"
 	"github.com/ultus-net/rss-tui/internal/store"
 	"github.com/ultus-net/rss-tui/internal/textutil"
 	"github.com/ultus-net/rss-tui/internal/theme"
@@ -678,5 +680,173 @@ func TestPassiveReservesRowsForFailures(t *testing.T) {
 	}
 	if strings.Contains(joined, "Headline 19") {
 		t.Fatalf("articles should yield height to failures:\n%s", joined)
+	}
+}
+
+func keyPress(t *testing.T, m Model, key string) (Model, tea.Cmd) {
+	t.Helper()
+	var msg tea.KeyMsg
+	switch key {
+	case "esc":
+		msg = tea.KeyMsg{Type: tea.KeyEsc}
+	case "enter":
+		msg = tea.KeyMsg{Type: tea.KeyEnter}
+	case "up":
+		msg = tea.KeyMsg{Type: tea.KeyUp}
+	case "down":
+		msg = tea.KeyMsg{Type: tea.KeyDown}
+	case "left":
+		msg = tea.KeyMsg{Type: tea.KeyLeft}
+	case "right":
+		msg = tea.KeyMsg{Type: tea.KeyRight}
+	default:
+		msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)}
+	}
+	model, cmd := m.Update(msg)
+	return model.(Model), cmd
+}
+
+func TestSettingsMenuChangesAndPersists(t *testing.T) {
+	oldTTL := statusTTL
+	statusTTL = time.Millisecond
+	defer func() { statusTTL = oldTTL }()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	seed := `# my settings
+refresh_interval: 10m
+theme: nord
+notifications: false
+
+# subscriptions
+feeds:
+  - url: https://example.com/rss
+    title: Example
+    category: tech
+`
+	if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	cfg, _, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	notifier := notify.New(false)
+	m := New(Deps{Cfg: cfg, ConfigPath: path, Notifier: notifier, Theme: theme.Get(cfg.Theme)})
+	m.width, m.height, m.ready = 100, 30, true
+
+	m, cmd := keyPress(t, m, ",")
+	runCmds(cmd)
+	if m.overlay != overlaySettings {
+		t.Fatalf(", did not open settings: overlay=%v", m.overlay)
+	}
+
+	m, cmd = keyPress(t, m, "l")
+	runCmds(cmd)
+	if m.theme.Name != "gruvbox-dark" || cfg.Theme != "gruvbox-dark" {
+		t.Fatalf("theme after l = %q / cfg %q", m.theme.Name, cfg.Theme)
+	}
+
+	m, _ = keyPress(t, m, "j")
+	m, cmd = keyPress(t, m, "l")
+	runCmds(cmd)
+	if cfg.RefreshInterval.Std() != 15*time.Minute {
+		t.Fatalf("refresh = %s", cfg.RefreshInterval)
+	}
+
+	m, _ = keyPress(t, m, "j")
+	m, cmd = keyPress(t, m, "l")
+	runCmds(cmd)
+	if !cfg.Notifications || !notifier.Enabled() {
+		t.Fatalf("notifications cfg=%v notifier=%v", cfg.Notifications, notifier.Enabled())
+	}
+
+	m, _ = keyPress(t, m, "j")
+	m, cmd = keyPress(t, m, "l")
+	runCmds(cmd)
+	if cfg.PassiveItems != 30 {
+		t.Fatalf("passive items = %d", cfg.PassiveItems)
+	}
+
+	m, _ = keyPress(t, m, "j")
+	m, cmd = keyPress(t, m, "l")
+	runCmds(cmd)
+	if !cfg.PassiveUnreadOnly {
+		t.Fatal("passive unread only did not toggle")
+	}
+
+	m, _ = keyPress(t, m, "g")
+	m, cmd = keyPress(t, m, "h")
+	runCmds(cmd)
+	if cfg.Theme != "nord" || m.theme.Name != "nord" {
+		t.Fatalf("theme after h = %q / cfg %q", m.theme.Name, cfg.Theme)
+	}
+
+	m, _ = keyPress(t, m, "esc")
+	if m.overlay != overlayNone {
+		t.Fatalf("esc did not close settings: overlay=%v", m.overlay)
+	}
+
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read saved: %v", err)
+	}
+	for _, want := range []string{"# my settings", "# subscriptions", "refresh_interval: 15m", "theme: nord"} {
+		if !strings.Contains(string(saved), want) {
+			t.Fatalf("saved config missing %q:\n%s", want, saved)
+		}
+	}
+
+	reloaded, _, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.Theme != "nord" || reloaded.RefreshInterval.Std() != 15*time.Minute {
+		t.Fatalf("reloaded theme/refresh = %q/%s", reloaded.Theme, reloaded.RefreshInterval)
+	}
+	if !reloaded.Notifications || reloaded.PassiveItems != 30 || !reloaded.PassiveUnreadOnly {
+		t.Fatalf("reloaded flags = %v/%d/%v", reloaded.Notifications, reloaded.PassiveItems, reloaded.PassiveUnreadOnly)
+	}
+	if len(reloaded.Feeds) != 1 || reloaded.Feeds[0].Title != "Example" {
+		t.Fatalf("feeds changed: %+v", reloaded.Feeds)
+	}
+}
+
+func TestSettingsMenuRendersAndFits(t *testing.T) {
+	cfg := &config.Config{RefreshInterval: config.Duration(10 * time.Minute), PassiveItems: 20}
+	cfg.Theme = "nord"
+	for _, size := range [][2]int{{120, 30}, {80, 24}, {40, 12}} {
+		m := New(Deps{Cfg: cfg, ConfigPath: filepath.Join(t.TempDir(), "config.yaml"), Theme: theme.Get("nord")})
+		m.width, m.height, m.ready = size[0], size[1], true
+		m.overlay = overlaySettings
+		lines := strings.Split(m.View(), "\n")
+		if len(lines) != m.height {
+			t.Fatalf("%dx%d: view lines = %d", size[0], size[1], len(lines))
+		}
+		if !strings.Contains(m.View(), "settings") {
+			t.Fatalf("%dx%d: settings title missing", size[0], size[1])
+		}
+	}
+}
+
+func TestSettingsSaveErrorFlashes(t *testing.T) {
+	cfg := &config.Config{RefreshInterval: config.Duration(10 * time.Minute)}
+	cfg.Theme = "nord"
+	m := New(Deps{Cfg: cfg, Theme: theme.Get("nord")})
+	m.width, m.height, m.ready = 100, 30, true
+	m.overlay = overlaySettings
+	m.settingsCursor = settingNotifications
+
+	model, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	m = model.(Model)
+	if cmd == nil {
+		t.Fatal("change produced no command")
+	}
+	if !strings.Contains(m.status, "notifications") {
+		t.Fatalf("status = %q", m.status)
+	}
+	model, _ = m.Update(settingsSavedMsg{err: fmt.Errorf("config: empty path")})
+	m = model.(Model)
+	if !strings.Contains(m.status, "could not save settings") {
+		t.Fatalf("save error did not flash: %q", m.status)
 	}
 }
