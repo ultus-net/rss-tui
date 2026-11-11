@@ -241,6 +241,43 @@ func TestFeedsReportsHealthAndValidators(t *testing.T) {
 	}
 }
 
+// TestValidatorsSurviveReopen proves the conditional-fetch state comes from
+// disk, not from process memory, so a restarted reader still sends If-None-Match.
+func TestValidatorsSurviveReopen(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := st.SyncFeed(ctx, IngestFeed{
+		URL: "https://example.com/rss", Title: "Example", Category: "tech",
+		ETag: `"abc"`, LastModified: "Mon, 02 Jan 2023 15:04:05 GMT",
+	}); err != nil {
+		st.Close()
+		t.Fatalf("sync: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+	feeds, err := reopened.Feeds(ctx)
+	if err != nil {
+		t.Fatalf("Feeds: %v", err)
+	}
+	if len(feeds) != 1 {
+		t.Fatalf("feeds = %d, want 1", len(feeds))
+	}
+	if feeds[0].ETag != `"abc"` || feeds[0].LastModified != "Mon, 02 Jan 2023 15:04:05 GMT" {
+		t.Fatalf("validators lost across restart: %+v", feeds[0])
+	}
+}
+
 func TestRecordFeedErrorFollowsConfigAndClears(t *testing.T) {
 	ctx := context.Background()
 	st := newTestStore(t)

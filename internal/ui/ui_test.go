@@ -412,6 +412,26 @@ func TestRefreshCmdRevalidatesAndClearsErrors(t *testing.T) {
 	}
 }
 
+// TestRefreshDoneReplacesErrorList pins the intended semantics: each cycle
+// polls every configured feed, so its result set is the complete health
+// picture and a stale persisted error must not survive a healthy poll.
+func TestRefreshDoneReplacesErrorList(t *testing.T) {
+	m := testModel(120, 30)
+	m.feedErrors = []feedError{{Feed: "Old", Err: "stale", At: time.Now()}}
+
+	model, _ := m.Update(refreshDoneMsg{at: time.Now()})
+	m = model.(Model)
+	if len(m.feedErrors) != 0 {
+		t.Fatalf("a healthy poll kept stale errors: %+v", m.feedErrors)
+	}
+
+	model, _ = m.Update(refreshDoneMsg{at: time.Now(), errors: []feedError{{Feed: "New", Err: "HTTP 500"}}})
+	m = model.(Model)
+	if len(m.feedErrors) != 1 || m.feedErrors[0].Feed != "New" {
+		t.Fatalf("a failed feed was not reported: %+v", m.feedErrors)
+	}
+}
+
 func TestPassiveReservesRowsForFailures(t *testing.T) {
 	now := time.Now()
 	articles := make([]store.Article, 0, 20)

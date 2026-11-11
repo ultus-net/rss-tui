@@ -90,6 +90,10 @@ func TestParseRejectsInvalidXML(t *testing.T) {
 	if _, err := Parse(strings.NewReader("<opml><body>")); err == nil {
 		t.Fatal("expected a parse error for truncated XML")
 	}
+	if _, err := Parse(strings.NewReader(
+		`<?xml version="1.0"?><rss><channel><title>x</title></channel></rss>`)); err == nil {
+		t.Fatal("expected a parse error for a non-OPML root element")
+	}
 }
 
 func TestExportEmptyWritesValidDocument(t *testing.T) {
