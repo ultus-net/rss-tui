@@ -68,3 +68,21 @@ func TestNextCyclesInOrder(t *testing.T) {
 		t.Fatalf("cycle ended at %s, want %s", cur, DefaultName)
 	}
 }
+
+func TestStepWalksBothWays(t *testing.T) {
+	names := Names()
+	for i, name := range names {
+		if got := Step(name, 1); got.Name != names[(i+1)%len(names)] {
+			t.Fatalf("Step(%s, 1) = %s", name, got.Name)
+		}
+		if got := Step(name, -1); got.Name != names[(i-1+len(names))%len(names)] {
+			t.Fatalf("Step(%s, -1) = %s", name, got.Name)
+		}
+	}
+	if got := Step(DefaultName, len(names)); got.Name != DefaultName {
+		t.Fatalf("full step = %s", got.Name)
+	}
+	if got := Step("nonsense", 1); got.Name != names[1] {
+		t.Fatalf("unknown step = %s", got.Name)
+	}
+}

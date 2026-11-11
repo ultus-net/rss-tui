@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -27,6 +28,7 @@ type NewArticles struct {
 // Notifier shells out to notify-send (Linux) or osascript (macOS). It is off by
 // default and never blocks the UI: callers run it in a goroutine.
 type Notifier struct {
+	mu      sync.RWMutex
 	enabled bool
 	goos    string
 	look    func(string) (string, error)
@@ -45,7 +47,25 @@ func New(enabled bool) *Notifier {
 	}
 }
 
-func (n *Notifier) Enabled() bool { return n != nil && n.enabled }
+func (n *Notifier) Enabled() bool {
+	if n == nil {
+		return false
+	}
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.enabled
+}
+
+// SetEnabled flips notifications for the next refresh cycle. It is safe to call
+// from the UI goroutine while a refresh runs.
+func (n *Notifier) SetEnabled(enabled bool) {
+	if n == nil {
+		return
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.enabled = enabled
+}
 
 // Send fires one notification. A missing notifier returns ErrUnavailable so
 // callers can stay quiet instead of nagging.

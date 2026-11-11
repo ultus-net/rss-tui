@@ -8,6 +8,13 @@ All notable changes to rss-tui are recorded here. The format follows
 
 ### Added
 
+- `,` opens a settings menu for theme, refresh interval, notifications, passive
+  items, and passive unread only. A change applies live and is written to
+  `config.yaml` immediately, keeping comments, the feed block, and a
+  `config.yaml.bak` of the previous file.
+- The YAML `theme` is now authoritative. A theme stored in SQLite by an older
+  build is adopted into `config.yaml` once on first start, when the file still
+  holds the default theme.
 - The article list shows a compact age stamp (`5m`, `3h`, `2d`, `2 Jan`) between
   the headline and the feed tag. It hides below 60 columns so the headline keeps
   the space. The preview keeps its verbose relative time.

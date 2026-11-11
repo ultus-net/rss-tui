@@ -136,13 +136,24 @@ func Names() []string {
 
 // Next returns the palette after name, wrapping at the end.
 func Next(name string) Palette {
+	return Step(name, 1)
+}
+
+// Step returns the palette delta places from name in cycle order. A negative
+// delta walks backwards; both directions wrap. Unknown names start from the
+// default palette.
+func Step(name string, delta int) Palette {
 	p, _ := Resolve(name)
+	at := 0
 	for i, n := range order {
 		if n == p.Name {
-			return palettes[order[(i+1)%len(order)]]
+			at = i
+			break
 		}
 	}
-	return palettes[order[0]]
+	n := len(order)
+	at = ((at+delta)%n + n) % n
+	return palettes[order[at]]
 }
 
 // Valid reports whether every role holds a hex colour. The test suite runs this

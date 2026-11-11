@@ -18,7 +18,7 @@ Four choices were settled with the operator before implementation.
 | --- | --- | --- |
 | Storage | SQLite via `modernc.org/sqlite` | Pure Go, no CGO. Indexed unread counts and atomic read-state writes stay fast with thousands of cached articles. A JSON file rewrites everything on each mark-read. |
 | Notifications | Opt-in desktop notification, coalesced per cycle | Quiet first run. One popup per poll, never one per article. Missing daemon is ignored. |
-| Themes | Six IDE palettes, `t` cycles live, choice persisted | Palettes are data, not UI code. Live cycling makes a low-glare choice cheap to find. |
+| Themes | Six IDE palettes, `t` cycles live, choice persisted in `config.yaml` | Palettes are data, not UI code. Live cycling makes a low-glare choice cheap to find. |
 | Narrow terminals | Single pane under 100 cols, `Tab` forces it | Small tmux panes are the primary use case. Squeezing two panes there helps nobody. |
 
 Alternatives rejected: a single-file JSON state (write amplification), an
@@ -108,8 +108,13 @@ meta(key PRIMARY KEY, value)
 - Pruning uses `ROW_NUMBER() OVER (PARTITION BY feed_id ORDER BY published)` over
   unstarred rows only, so the cap bounds the transient cache and a starred
   article survives. `starred` is user intent, and `is_read` is triage state.
-- `theme` and `last_updated` live in `meta`. Config stays user-authored YAML; the
-  app only rewrites it for an explicit `import-opml`, and keeps a `.bak`.
+- `last_updated` lives in `meta`. The theme does not: `config.yaml` owns the
+  user's settings, so the app reads the theme from YAML and writes it back
+  through the comment-preserving saver. The app rewrites the config only for
+  `import-opml` and a settings-menu change, and keeps a `.bak`.
+- A `meta.theme` row from an older build is reconciled once on start: while the
+  YAML still holds the default theme it is adopted into the config, and the key
+  is deleted either way. A theme already chosen in YAML always wins.
 - `PRAGMA user_version` guards against opening a newer schema with an older
   build. Version 1 to 2 adds the two validator columns with `ALTER TABLE` in one
   transaction. Version 2 to 3 adds `articles.starred` and its index the same
@@ -142,6 +147,12 @@ meta(key PRIMARY KEY, value)
   reload does. This avoids a cursor jump while reading.
 - Layout answers one question: `single := width < 100 || manualSingle`. There is
   no second layout code path.
+- `,` opens the settings overlay. Rows are theme, refresh interval,
+  notifications, passive items, and passive unread only; `j`/`k` move and
+  `h`/`l`, `Enter`, or `Space` change a row. A change applies to the live model
+  at once and is saved on the spot, so leaving the menu never reverts it. Passive
+  rows only affect the next `--passive` run, and the new interval arms the next
+  tick rather than cancelling the pending one.
 
 ## Rendering and terminal safety
 
@@ -191,13 +202,14 @@ once.
 | Cache write | One transaction per feed; error shown in status and `e`; next poll retries. A later prune or meta failure does not roll back articles already committed. |
 | Browser launch | `tea.ExecProcess` releases the terminal; failure shown in status |
 | Notification | Best effort, 5s timeout, missing binary ignored |
-| Theme persist | Best effort; failure shown, theme still applied for the session |
+| Settings save | Comment-preserving YAML rewrite; failure shown in status, the live value still applies for the session, and the next successful save retries the write |
 | OPML import | Validate the merged config before writing; back up to `config.yaml.bak`, then write a temp file and rename. A failure leaves the live config untouched. |
 
 ## Testing
 
 - Config: sample generation, duration parsing, defaults, dedupe, validation,
-  merge-by-URL, backup and atomic save.
+  merge-by-URL, backup and atomic save, and a comment-preserving save that keeps
+  the feed block and appends a missing key before it.
 - Store: idempotent upsert, read-state preservation, unread/category filters,
   pruning, cascade on feed removal, meta upsert, feed health counters, error
   adoption of renamed feeds, and a v1-to-v2 migration against a seeded database.
@@ -212,5 +224,8 @@ once.
 - UI: filter combinations, pane layout at 90/120/160 columns, exact view height
   and width, row truncation, status contents, next-unread traversal, OSC 52
   payload, feed-health overlay, persisted-error seeding, passive block width and
-  height caps with reserved failure rows, redraw cursor arithmetic.
-- Theme: every palette fills every role with a valid hex colour.
+  height caps with reserved failure rows, redraw cursor arithmetic, and a
+  settings menu that changes the live model and reloads the same values from a
+  temporary config file.
+- Theme: every palette fills every role with a valid hex colour, cycle order in
+  both directions, and a legacy `meta.theme` adopted into the YAML once.

@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -47,6 +48,17 @@ const (
 	overlayHelp
 	overlayErrors
 	overlayFeeds
+	overlaySettings
+)
+
+// Settings rows, in display order.
+const (
+	settingTheme = iota
+	settingRefresh
+	settingNotifications
+	settingPassiveItems
+	settingPassiveUnread
+	settingCount
 )
 
 type feedError struct {
@@ -57,14 +69,13 @@ type feedError struct {
 
 // Deps is everything the model needs, assembled in main.
 type Deps struct {
-	Cfg           *config.Config
-	Store         *store.Store
-	Fetcher       *feed.Fetcher
-	Notifier      *notify.Notifier
-	Theme         theme.Palette
-	ThemeExplicit bool
-	Browser       string
-	ConfigPath    string
+	Cfg        *config.Config
+	Store      *store.Store
+	Fetcher    *feed.Fetcher
+	Notifier   *notify.Notifier
+	Theme      theme.Palette
+	Browser    string
+	ConfigPath string
 }
 
 // Model is the Bubble Tea application state.
@@ -104,6 +115,8 @@ type Model struct {
 	feeds      []store.Feed
 	feedErrors []feedError
 	overlay    overlay
+
+	settingsCursor int
 }
 
 type previewCache struct {
@@ -480,17 +493,135 @@ func (m *Model) cycleCategory() {
 	m.recompute()
 }
 
-func (m *Model) cycleTheme() tea.Cmd {
-	next := theme.Next(m.theme.Name)
+// stepTheme advances the theme delta places, updates the live palette, and
+// records the new name in the config. Both `t` and the settings menu use it.
+func (m *Model) stepTheme(delta int) theme.Palette {
+	next := theme.Step(m.deps.Cfg.Theme, delta)
+	m.deps.Cfg.Theme = next.Name
 	m.theme = next
-	st := m.deps.Store
-	saved := func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return themeSavedMsg{err: st.SetMeta(ctx, "theme", next.Name)}
+	return next
+}
+
+// cycleTheme advances the theme from the `t` shortcut and persists it. The
+// settings overlay changes the theme through the same save path.
+func (m *Model) cycleTheme() tea.Cmd {
+	next := m.stepTheme(1)
+	return tea.Batch(m.flash("theme: "+next.Label), m.saveConfig())
+}
+
+var (
+	refreshChoices = []time.Duration{
+		time.Minute, 2 * time.Minute, 5 * time.Minute, 10 * time.Minute,
+		15 * time.Minute, 30 * time.Minute, time.Hour,
 	}
-	flash := m.flash("theme: " + next.Label)
-	return tea.Batch(flash, saved)
+	passiveChoices = []int{5, 10, 20, 30, 50, 100}
+)
+
+// stepIndex moves from cur to the neighbouring choice in the direction of
+// delta and clamps at the ends. A cur that is not a choice moves to the next
+// choice in that direction.
+func stepIndex(cur int64, choices []int64, delta int) int {
+	at := -1
+	for i, c := range choices {
+		if c == cur {
+			at = i
+			break
+		}
+	}
+	switch {
+	case at >= 0:
+		at += delta
+	case delta > 0:
+		at = len(choices) - 1
+		for i, c := range choices {
+			if c > cur {
+				at = i
+				break
+			}
+		}
+	default:
+		at = 0
+		for i := len(choices) - 1; i >= 0; i-- {
+			if choices[i] < cur {
+				at = i
+				break
+			}
+		}
+	}
+	if at < 0 {
+		at = 0
+	}
+	if at >= len(choices) {
+		at = len(choices) - 1
+	}
+	return at
+}
+
+// saveMu serialises config writes so concurrent settings keypresses cannot
+// interleave their temporary files.
+var saveMu sync.Mutex
+
+// saveConfig writes the current settings back to config.yaml, keeping comments
+// and the feed block.
+func (m Model) saveConfig() tea.Cmd {
+	path := m.deps.ConfigPath
+	cfg := m.deps.Cfg
+	return func() tea.Msg {
+		saveMu.Lock()
+		defer saveMu.Unlock()
+		return settingsSavedMsg{err: config.SavePreservingComments(path, cfg)}
+	}
+}
+
+// changeSetting applies delta to the selected row, updates the live state, and
+// persists. Passive rows only affect the next --passive run.
+func (m *Model) changeSetting(delta int) tea.Cmd {
+	cfg := m.deps.Cfg
+	label := ""
+	switch m.settingsCursor {
+	case settingTheme:
+		next := m.stepTheme(delta)
+		label = "theme: " + next.Label
+	case settingRefresh:
+		at := stepIndex(int64(cfg.RefreshInterval.Std()), durationInts(refreshChoices), delta)
+		cfg.RefreshInterval = config.Duration(refreshChoices[at])
+		label = "refresh: " + refreshChoices[at].String()
+	case settingNotifications:
+		cfg.Notifications = !cfg.Notifications
+		m.deps.Notifier.SetEnabled(cfg.Notifications)
+		label = "notifications " + onOff(cfg.Notifications)
+	case settingPassiveItems:
+		at := stepIndex(int64(cfg.PassiveItems), int64s(passiveChoices), delta)
+		cfg.PassiveItems = passiveChoices[at]
+		label = fmt.Sprintf("passive items: %d", cfg.PassiveItems)
+	case settingPassiveUnread:
+		cfg.PassiveUnreadOnly = !cfg.PassiveUnreadOnly
+		label = "passive unread only " + onOff(cfg.PassiveUnreadOnly)
+	}
+	return tea.Batch(m.flash(label), m.saveConfig())
+}
+
+func durationInts(in []time.Duration) []int64 {
+	out := make([]int64, len(in))
+	for i, d := range in {
+		out[i] = int64(d)
+	}
+	return out
+}
+
+func int64s(in []int) []int64 {
+	out := make([]int64, len(in))
+	for i, v := range in {
+		out[i] = int64(v)
+	}
+	return out
+}
+
+func onOff(v bool) string {
+	if v {
+		return "on"
+	}
+	return "off"
 }
 
 func (m *Model) openInBrowser() tea.Cmd {
@@ -554,9 +685,6 @@ func (m Model) loadCmd() tea.Cmd {
 			if ts, perr := strconv.ParseInt(v, 10, 64); perr == nil {
 				msg.lastUpdated = time.Unix(ts, 0)
 			}
-		}
-		if v, ok, metaErr := st.Meta(ctx, "theme"); metaErr == nil && ok {
-			msg.themeName = v
 		}
 		return msg
 	}

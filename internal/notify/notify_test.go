@@ -45,6 +45,26 @@ func TestDisabledIsNoop(t *testing.T) {
 	}
 }
 
+func TestSetEnabledIsLive(t *testing.T) {
+	n := New(false)
+	if n.Enabled() {
+		t.Fatal("New(false) is enabled")
+	}
+	n.SetEnabled(true)
+	if !n.Enabled() {
+		t.Fatal("SetEnabled(true) did not take")
+	}
+	n.SetEnabled(false)
+	if n.Enabled() {
+		t.Fatal("SetEnabled(false) did not take")
+	}
+	var zero *Notifier
+	zero.SetEnabled(true)
+	if zero.Enabled() {
+		t.Fatal("nil notifier reported enabled")
+	}
+}
+
 func TestMissingNotifierIsUnavailable(t *testing.T) {
 	n := &Notifier{
 		enabled: true,

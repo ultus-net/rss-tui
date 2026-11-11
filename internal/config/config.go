@@ -149,19 +149,136 @@ func Save(path string, cfg *Config) error {
 	if strings.TrimSpace(path) == "" {
 		return errors.New("config: empty path")
 	}
+	data, err := marshalConfig(cfg)
+	if err != nil {
+		return err
+	}
+	return writeAtomic(path, data)
+}
+
+// SavePreservingComments writes cfg into the existing YAML file at path without
+// discarding comments. Scalar settings are replaced in place and missing keys
+// are appended before the feeds list; the feeds themselves stay exactly as
+// authored. A missing file is created from cfg. The previous file is kept at
+// path.bak.
+func SavePreservingComments(path string, cfg *Config) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("config: empty path")
+	}
+	existing, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return Save(path, cfg)
+	}
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(existing, &doc); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	if len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
+		return fmt.Errorf("config: %s is not a YAML mapping", path)
+	}
+	root := doc.Content[0]
+
+	encoded, err := marshalNode(cfg)
+	if err != nil {
+		return err
+	}
+	fresh := encoded.Content[0]
+	freshValues := make(map[string]*yaml.Node, len(fresh.Content)/2)
+	for i := 0; i+1 < len(fresh.Content); i += 2 {
+		freshValues[fresh.Content[i].Value] = fresh.Content[i+1]
+	}
+
+	present := make(map[string]bool, len(root.Content)/2)
+	feedsAt := -1
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		key := root.Content[i].Value
+		present[key] = true
+		if key == "feeds" {
+			feedsAt = i
+			continue
+		}
+		replacement, ok := freshValues[key]
+		if !ok {
+			continue
+		}
+		// Keep any comment that was attached to the old value node.
+		old := root.Content[i+1]
+		replacement.HeadComment = old.HeadComment
+		replacement.LineComment = old.LineComment
+		replacement.FootComment = old.FootComment
+		root.Content[i+1] = replacement
+	}
+
+	at := len(root.Content)
+	if feedsAt >= 0 {
+		at = feedsAt
+	}
+	for i := 0; i+1 < len(fresh.Content); i += 2 {
+		key := fresh.Content[i].Value
+		if key == "feeds" || present[key] {
+			continue
+		}
+		pair := []*yaml.Node{fresh.Content[i], fresh.Content[i+1]}
+		root.Content = append(root.Content, nil, nil)
+		copy(root.Content[at+2:], root.Content[at:])
+		copy(root.Content[at:], pair)
+		at += 2
+	}
+
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
-	if err := enc.Encode(cfg); err != nil {
+	if err := enc.Encode(&doc); err != nil {
 		return fmt.Errorf("encode config: %w", err)
 	}
 	if err := enc.Close(); err != nil {
 		return fmt.Errorf("encode config: %w", err)
 	}
-	data := buf.Bytes()
+	return writeAtomic(path, buf.Bytes())
+}
+
+func marshalConfig(cfg *Config) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(cfg); err != nil {
+		return nil, fmt.Errorf("encode config: %w", err)
+	}
+	if err := enc.Close(); err != nil {
+		return nil, fmt.Errorf("encode config: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+func marshalNode(cfg *Config) (*yaml.Node, error) {
+	data, err := marshalConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("parse encoded config: %w", err)
+	}
+	if len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
+		return nil, errors.New("config: encoded document is not a mapping")
+	}
+	return &doc, nil
+}
+
+// writeAtomic backs up the existing file, then replaces it through a temporary
+// file so an interrupted save cannot truncate the live config. The replacement
+// keeps the file's permissions, defaulting to 0600 for a new file.
+func writeAtomic(path string, data []byte) error {
+	mode := os.FileMode(0o600)
 	existing, err := os.ReadFile(path)
 	switch {
 	case err == nil:
+		if info, statErr := os.Stat(path); statErr == nil {
+			mode = info.Mode().Perm()
+		}
 		if err := os.WriteFile(path+".bak", existing, 0o600); err != nil {
 			return fmt.Errorf("back up config: %w", err)
 		}
@@ -171,8 +288,24 @@ func Save(path string, cfg *Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	// A unique temporary file keeps two concurrent saves from sharing one path.
+	file, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp*")
+	if err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+	tmp := file.Name()
+	if err := file.Chmod(mode); err != nil {
+		file.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("write config: %w", err)
+	}
+	if _, err := file.Write(data); err != nil {
+		file.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("write config: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		os.Remove(tmp)
 		return fmt.Errorf("write config: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
