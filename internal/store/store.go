@@ -14,7 +14,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 const schema = `
 CREATE TABLE IF NOT EXISTS feeds (
@@ -40,11 +40,13 @@ CREATE TABLE IF NOT EXISTS articles (
 	published  INTEGER NOT NULL,
 	first_seen INTEGER NOT NULL,
 	is_read    INTEGER NOT NULL DEFAULT 0,
+	starred    INTEGER NOT NULL DEFAULT 0,
 	UNIQUE(feed_id, guid)
 );
 
 CREATE INDEX IF NOT EXISTS idx_articles_published ON articles(published DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_articles_unread ON articles(is_read, published DESC);
+CREATE INDEX IF NOT EXISTS idx_articles_starred ON articles(starred, published DESC);
 
 CREATE TABLE IF NOT EXISTS meta (
 	key   TEXT PRIMARY KEY,
@@ -58,6 +60,10 @@ var migrations = [][]string{
 	{
 		`ALTER TABLE feeds ADD COLUMN etag TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE feeds ADD COLUMN last_modified TEXT NOT NULL DEFAULT ''`,
+	},
+	{
+		`ALTER TABLE articles ADD COLUMN starred INTEGER NOT NULL DEFAULT 0`,
+		`CREATE INDEX IF NOT EXISTS idx_articles_starred ON articles(starred, published DESC)`,
 	},
 }
 
@@ -88,6 +94,7 @@ type Article struct {
 	Published    time.Time
 	FirstSeen    time.Time
 	Read         bool
+	Starred      bool
 	FeedTitle    string
 	FeedCategory string
 }
@@ -115,9 +122,10 @@ type IngestArticle struct {
 
 // ListOptions narrows an article query.
 type ListOptions struct {
-	UnreadOnly bool
-	Category   string
-	Limit      int
+	UnreadOnly  bool
+	StarredOnly bool
+	Category    string
+	Limit       int
 }
 
 // Store owns the SQLite connection. It is safe for concurrent use; writes are
@@ -351,11 +359,14 @@ func (s *Store) Feeds(ctx context.Context) ([]Feed, error) {
 func (s *Store) Articles(ctx context.Context, opts ListOptions) ([]Article, error) {
 	var q strings.Builder
 	q.WriteString(`SELECT a.id, a.feed_id, a.guid, a.title, a.link, a.author, a.summary, a.content,
-		a.published, a.first_seen, a.is_read, f.title, f.category
+		a.published, a.first_seen, a.is_read, a.starred, f.title, f.category
 		FROM articles a JOIN feeds f ON f.id = a.feed_id WHERE 1 = 1`)
-	args := make([]any, 0, 3)
+	args := make([]any, 0, 4)
 	if opts.UnreadOnly {
 		q.WriteString(" AND a.is_read = 0")
+	}
+	if opts.StarredOnly {
+		q.WriteString(" AND a.starred = 1")
 	}
 	if opts.Category != "" {
 		q.WriteString(" AND f.category = ?")
@@ -377,7 +388,7 @@ func (s *Store) Articles(ctx context.Context, opts ListOptions) ([]Article, erro
 		var a Article
 		var published, firstSeen int64
 		if err := rows.Scan(&a.ID, &a.FeedID, &a.GUID, &a.Title, &a.Link, &a.Author,
-			&a.Summary, &a.Content, &published, &firstSeen, &a.Read, &a.FeedTitle, &a.FeedCategory); err != nil {
+			&a.Summary, &a.Content, &published, &firstSeen, &a.Read, &a.Starred, &a.FeedTitle, &a.FeedCategory); err != nil {
 			return nil, fmt.Errorf("store: scan article: %w", err)
 		}
 		a.Published = time.Unix(published, 0)
@@ -392,11 +403,22 @@ func (s *Store) Articles(ctx context.Context, opts ListOptions) ([]Article, erro
 
 // MarkRead sets read state for the given article IDs.
 func (s *Store) MarkRead(ctx context.Context, ids []int64, read bool) error {
+	return s.setArticleFlag(ctx, "is_read", ids, read)
+}
+
+// SetStarred sets the starred flag for the given article IDs.
+func (s *Store) SetStarred(ctx context.Context, ids []int64, starred bool) error {
+	return s.setArticleFlag(ctx, "starred", ids, starred)
+}
+
+// setArticleFlag updates one boolean column for the given IDs. The column is an
+// internal literal, never caller input.
+func (s *Store) setArticleFlag(ctx context.Context, column string, ids []int64, set bool) error {
 	if len(ids) == 0 {
 		return nil
 	}
 	value := 0
-	if read {
+	if set {
 		value = 1
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -418,8 +440,8 @@ func (s *Store) MarkRead(ctx context.Context, ids []int64, read bool) error {
 			args = append(args, id)
 		}
 		if _, err := tx.ExecContext(ctx,
-			"UPDATE articles SET is_read = ? WHERE id IN ("+placeholders+")", args...); err != nil {
-			return fmt.Errorf("store: mark read: %w", err)
+			"UPDATE articles SET "+column+" = ? WHERE id IN ("+placeholders+")", args...); err != nil {
+			return fmt.Errorf("store: set %s: %w", column, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -437,17 +459,18 @@ func (s *Store) UnreadCount(ctx context.Context) (int, error) {
 	return n, nil
 }
 
-// Prune keeps only the newest perFeed articles per feed.
+// Prune keeps only the newest perFeed unstarred articles per feed. Starred
+// articles are user intent and sit outside the cache cap.
 func (s *Store) Prune(ctx context.Context, perFeed int) error {
 	if perFeed <= 0 {
 		return nil
 	}
 	if _, err := s.db.ExecContext(ctx, `
-		DELETE FROM articles WHERE id IN (
+		DELETE FROM articles WHERE starred = 0 AND id IN (
 			SELECT id FROM (
 				SELECT id, ROW_NUMBER() OVER (
 					PARTITION BY feed_id ORDER BY published DESC, id DESC
-				) AS rn FROM articles
+				) AS rn FROM articles WHERE starred = 0
 			) AS ranked WHERE rn > ?
 		)`, perFeed); err != nil {
 		return fmt.Errorf("store: prune: %w", err)

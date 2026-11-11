@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/ultus-net/rss-tui/internal/config"
@@ -152,6 +153,166 @@ func TestRecomputeAppliesFilters(t *testing.T) {
 	m.recompute()
 	if len(m.visible) != 3 {
 		t.Fatalf("cleared filters = %d", len(m.visible))
+	}
+}
+
+func TestStarredFilterComposes(t *testing.T) {
+	m := testModel(120, 30)
+	m.articles[0].Starred = true
+	m.articles[2].Starred = true
+	m.starredOnly = true
+	m.recompute()
+	if len(m.visible) != 2 {
+		t.Fatalf("starred = %d", len(m.visible))
+	}
+	if header := m.listHeader(); !strings.Contains(header, "starred") {
+		t.Fatalf("header does not name the filter: %q", header)
+	}
+
+	m.unreadOnly = true
+	m.recompute()
+	if len(m.visible) != 2 {
+		t.Fatalf("starred+unread = %d rows", len(m.visible))
+	}
+	if !strings.Contains(m.listHeader(), "starred") || !strings.Contains(m.listHeader(), "unread") {
+		t.Fatalf("header drops a composed filter: %q", m.listHeader())
+	}
+
+	m.category = "news"
+	m.recompute()
+	if len(m.visible) != 1 || m.visible[0].ID != 3 {
+		t.Fatalf("starred+unread+news = %+v", m.visible)
+	}
+
+	m.query = "tooling"
+	m.recompute()
+	if len(m.visible) != 1 || m.visible[0].ID != 3 {
+		t.Fatalf("starred+unread+news+/tooling = %+v", m.visible)
+	}
+
+	m.query = "zzz"
+	m.recompute()
+	if len(m.visible) != 0 {
+		t.Fatalf("non-matching query kept %d rows", len(m.visible))
+	}
+	if text := m.emptyText(); text != "no matches for /zzz" {
+		t.Fatalf("query empty text = %q", text)
+	}
+
+	m.query = ""
+	m.category = ""
+	if text := m.emptyText(); text != "no unread starred articles" {
+		t.Fatalf("empty text = %q", text)
+	}
+	m.unreadOnly = false
+	if text := m.emptyText(); text != "no starred articles" {
+		t.Fatalf("starred empty text = %q", text)
+	}
+}
+
+func TestStarredRowShowsMarker(t *testing.T) {
+	st := newStyles(theme.Get("nord"))
+	a := store.Article{Title: "Kept article", FeedTitle: "Example", Starred: true}
+	line := renderRow(a, 60, false, st)
+	if !strings.Contains(line, "★") || !strings.Contains(line, "Kept article") {
+		t.Fatalf("starred row = %q", line)
+	}
+	plain := renderRow(store.Article{Title: "Kept article", FeedTitle: "Example"}, 60, false, st)
+	if strings.Contains(plain, "★") {
+		t.Fatalf("unstarred row has a marker: %q", plain)
+	}
+	for _, width := range []int{20, 40} {
+		narrow := renderRow(store.Article{Title: strings.Repeat("Headline ", 6), FeedTitle: "Example", Starred: true}, width, false, st)
+		if got := ansi.StringWidth(narrow); got > width {
+			t.Fatalf("starred row at width %d rendered %d columns: %q", width, got, narrow)
+		}
+	}
+}
+
+func TestStarKeyPersistsStar(t *testing.T) {
+	oldTTL := statusTTL
+	statusTTL = time.Millisecond
+	defer func() { statusTTL = oldTTL }()
+
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	defer st.Close()
+	if _, err := st.SyncFeed(ctx, store.IngestFeed{
+		URL: "https://example.com/rss", Title: "Example", Category: "tech",
+		Articles: []store.IngestArticle{{
+			GUID: "g1", Title: "Go 1.27", Link: "https://example.com/go", Published: time.Now(),
+		}},
+	}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	arts, err := st.Articles(ctx, store.ListOptions{})
+	if err != nil || len(arts) != 1 {
+		t.Fatalf("articles = %d, err %v", len(arts), err)
+	}
+
+	cfg := &config.Config{
+		RefreshInterval: config.Duration(10 * time.Minute),
+		Feeds:           []config.Feed{{URL: "https://example.com/rss", Title: "Example", Category: "tech"}},
+	}
+	m := New(Deps{Cfg: cfg, Store: st, Theme: theme.Get("nord")})
+	m.width, m.height, m.ready = 120, 30, true
+	m.articles = arts
+	m.recompute()
+
+	model, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	m = model.(Model)
+	runCmds(cmd)
+	if !m.selected().Starred {
+		t.Fatal("the key press did not star the row in memory")
+	}
+	stored, _ := st.Articles(ctx, store.ListOptions{StarredOnly: true})
+	if len(stored) != 1 || stored[0].ID != arts[0].ID {
+		t.Fatalf("star not persisted: %+v", stored)
+	}
+
+	model, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	m = model.(Model)
+	runCmds(cmd)
+	if m.selected().Starred {
+		t.Fatal("the second key press did not unstar the row")
+	}
+	stored, _ = st.Articles(ctx, store.ListOptions{StarredOnly: true})
+	if len(stored) != 0 {
+		t.Fatalf("unstar not persisted: %+v", stored)
+	}
+
+	model, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("S")})
+	m = model.(Model)
+	if !m.starredOnly || m.status != "starred only" {
+		t.Fatalf("S did not enable the filter: starred=%v status=%q", m.starredOnly, m.status)
+	}
+	if len(m.visible) != 0 {
+		t.Fatalf("starred filter kept %d unstarred rows", len(m.visible))
+	}
+	model, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("S")})
+	m = model.(Model)
+	if m.starredOnly || len(m.visible) != 1 {
+		t.Fatalf("S did not clear the filter: starred=%v visible=%d", m.starredOnly, len(m.visible))
+	}
+}
+
+// runCmds executes a command and every command it batches. The test shortens
+// statusTTL, so the flash tick returns instead of sleeping out the real TTL.
+func runCmds(cmd tea.Cmd) {
+	if cmd == nil {
+		return
+	}
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok {
+		return
+	}
+	for _, c := range batch {
+		if c != nil {
+			c()
+		}
 	}
 }
 

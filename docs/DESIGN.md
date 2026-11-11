@@ -98,22 +98,24 @@ trigger a second poll immediately after it returns.
 feeds(id, url UNIQUE, title, category, last_fetched, last_error,
       etag, last_modified)
 articles(id, feed_id, guid, title, link, author, summary, content,
-         published, first_seen, is_read,
+         published, first_seen, is_read, starred,
          UNIQUE(feed_id, guid))
 meta(key PRIMARY KEY, value)
 ```
 
 - `INSERT ... ON CONFLICT(feed_id, guid) DO NOTHING` makes re-fetch idempotent
-  and preserves `is_read`.
-- Pruning uses `ROW_NUMBER() OVER (PARTITION BY feed_id ORDER BY published)` and
-  keeps the newest `max_articles_per_feed`.
+  and preserves `is_read` and `starred`.
+- Pruning uses `ROW_NUMBER() OVER (PARTITION BY feed_id ORDER BY published)` over
+  unstarred rows only, so the cap bounds the transient cache and a starred
+  article survives. `starred` is user intent, and `is_read` is triage state.
 - `theme` and `last_updated` live in `meta`. Config stays user-authored YAML; the
   app only rewrites it for an explicit `import-opml`, and keeps a `.bak`.
 - `PRAGMA user_version` guards against opening a newer schema with an older
   build. Version 1 to 2 adds the two validator columns with `ALTER TABLE` in one
-  transaction; a fresh database is created at the current version and skips the
-  migration list. The upgrade path is tested against a seeded v1 database, not
-  only a fresh file.
+  transaction. Version 2 to 3 adds `articles.starred` and its index the same
+  way. A fresh database is created at the current version and skips the
+  migration list. The upgrade path is tested against seeded v1 and v2 databases,
+  not only a fresh file.
 - Feed health is read from the same rows the poll writes: `Feeds()` joins the
   article counts, so the `F` overlay and `e` errors show persisted state rather
   than this process's memory.
