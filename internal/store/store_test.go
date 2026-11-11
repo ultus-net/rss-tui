@@ -661,8 +661,8 @@ func TestMigrateFromV2AddsStarred(t *testing.T) {
 	if err := st.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatalf("read version: %v", err)
 	}
-	if version != 3 {
-		t.Fatalf("user_version = %d, want 3", version)
+	if version != schemaVersion {
+		t.Fatalf("user_version = %d, want %d", version, schemaVersion)
 	}
 	var indexes int
 	if err := st.db.QueryRowContext(ctx,
@@ -701,5 +701,261 @@ func TestOpenRejectsNewerSchema(t *testing.T) {
 	raw.Close()
 	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "newer") {
 		t.Fatalf("Open returned %v", err)
+	}
+}
+
+func TestSearchBodiesFindsCachedContent(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	if _, err := st.SyncFeed(ctx, IngestFeed{
+		URL: "https://a.example/rss", Title: "Alpha", Category: "tech",
+		Articles: []IngestArticle{
+			{GUID: "g1", Title: "Postgres vacuum", Link: "https://a.example/1",
+				Content: "A deep dive into autovacuum tuning.", Published: time.Now()},
+			{GUID: "g2", Title: "Rust lifetimes", Link: "https://a.example/2",
+				Content: "Borrow checker notes.", Published: time.Now()},
+		},
+	}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	arts, err := st.Articles(ctx, ListOptions{})
+	if err != nil {
+		t.Fatalf("articles: %v", err)
+	}
+	byGUID := make(map[string]int64, len(arts))
+	for _, a := range arts {
+		byGUID[a.GUID] = a.ID
+	}
+
+	cases := []struct {
+		query string
+		want  string
+	}{
+		{"autovacuum", "g1"},
+		{"autov", "g1"},     // prefix match while typing
+		{"lifetimes", "g2"}, // title is indexed too
+		{"checker", "g2"},   // body only
+	}
+	for _, c := range cases {
+		ids, err := st.SearchBodies(ctx, c.query, 0)
+		if err != nil {
+			t.Fatalf("SearchBodies(%q): %v", c.query, err)
+		}
+		if len(ids) != 1 || ids[0] != byGUID[c.want] {
+			t.Fatalf("SearchBodies(%q) = %v, want [%d]", c.query, ids, byGUID[c.want])
+		}
+	}
+
+	if ids, err := st.SearchBodies(ctx, "kubernetes", 0); err != nil || len(ids) != 0 {
+		t.Fatalf("no-match search = %v/%v", ids, err)
+	}
+	if ids, err := st.SearchBodies(ctx, "   ", 0); err != nil || len(ids) != 0 {
+		t.Fatalf("blank search = %v/%v", ids, err)
+	}
+	if ids, err := st.SearchBodies(ctx, "autovacuum", 1); err != nil || len(ids) != 1 {
+		t.Fatalf("limit search = %v/%v", ids, err)
+	}
+}
+
+func TestSearchBodiesTracksReadStateAndPrune(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	if _, err := st.SyncFeed(ctx, IngestFeed{
+		URL: "https://kept.example/rss", Title: "Kept", Category: "tech",
+		Articles: []IngestArticle{{GUID: "k1", Title: "Kept", Link: "https://kept.example/1",
+			Content: "keptbodyword here.", Published: time.Now()}},
+	}); err != nil {
+		t.Fatalf("sync kept: %v", err)
+	}
+	if _, err := st.SyncFeed(ctx, IngestFeed{
+		URL: "https://gone.example/rss", Title: "Gone", Category: "tech",
+		Articles: []IngestArticle{{GUID: "g1", Title: "Gone", Link: "https://gone.example/1",
+			Content: "gonebodyword here.", Published: time.Now()}},
+	}); err != nil {
+		t.Fatalf("sync gone: %v", err)
+	}
+	arts, _ := st.Articles(ctx, ListOptions{})
+	var keptID int64
+	for _, a := range arts {
+		if a.GUID == "k1" {
+			keptID = a.ID
+		}
+	}
+
+	// A read-state write must not drop the row from the index.
+	if err := st.MarkRead(ctx, []int64{keptID}, true); err != nil {
+		t.Fatalf("MarkRead: %v", err)
+	}
+	if ids, err := st.SearchBodies(ctx, "keptbodyword", 0); err != nil || len(ids) != 1 {
+		t.Fatalf("search after mark read = %v/%v", ids, err)
+	}
+
+	// Pruning a feed cascades its articles away and must clear their index rows.
+	if err := st.PruneFeeds(ctx, []string{"https://kept.example/rss"}); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if ids, err := st.SearchBodies(ctx, "gonebodyword", 0); err != nil || len(ids) != 0 {
+		t.Fatalf("pruned feed still searchable = %v/%v", ids, err)
+	}
+	if ids, err := st.SearchBodies(ctx, "keptbodyword", 0); err != nil || len(ids) != 1 {
+		t.Fatalf("kept feed lost from index = %v/%v", ids, err)
+	}
+}
+
+func TestSearchBodiesSanitisesQuery(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	if _, err := st.SyncFeed(ctx, IngestFeed{
+		URL: "https://a.example/rss", Title: "Alpha", Category: "tech",
+		Articles: []IngestArticle{{GUID: "g1", Title: "Quoted", Link: "https://a.example/1",
+			Content: `He said "hi" and left.`, Published: time.Now()}},
+	}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	for _, query := range []string{
+		`"`, `""`, `*`, `-`, `NOT`, `a OR b`, `"hi`, `foo(bar)`, `a:b`, `near(`, `^`,
+		strings.Repeat("term ", 20), `said "hi"`,
+	} {
+		if _, err := st.SearchBodies(ctx, query, 0); err != nil {
+			t.Fatalf("SearchBodies(%q): %v", query, err)
+		}
+	}
+
+	// A term wrapped in quotes is still a term, not syntax.
+	ids, err := st.SearchBodies(ctx, `"hi`, 0)
+	if err != nil || len(ids) != 1 {
+		t.Fatalf("quoted term = %v/%v", ids, err)
+	}
+	// Punctuation alone cannot match anything.
+	if ids, err := st.SearchBodies(ctx, `* () ^`, 0); err != nil || len(ids) != 0 {
+		t.Fatalf("punctuation-only = %v/%v", ids, err)
+	}
+}
+
+func TestSearchIndexRebuildsAfterDrift(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	if _, err := st.SyncFeed(ctx, IngestFeed{
+		URL: "https://a.example/rss", Title: "Alpha", Category: "tech",
+		Articles: []IngestArticle{{GUID: "g1", Title: "Kept", Link: "https://a.example/1",
+			Content: "rebuildbodyword", Published: time.Now()}},
+	}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	if _, err := st.db.ExecContext(ctx, `INSERT INTO articles_fts(articles_fts) VALUES('delete-all')`); err != nil {
+		t.Fatalf("clear index: %v", err)
+	}
+	if ids, err := st.SearchBodies(ctx, "rebuildbodyword", 0); err != nil || len(ids) != 0 {
+		t.Fatalf("cleared index = %v/%v", ids, err)
+	}
+
+	// The documented repair path rebuilds from the content table.
+	if _, err := st.db.ExecContext(ctx, `INSERT INTO articles_fts(articles_fts) VALUES('rebuild')`); err != nil {
+		t.Fatalf("rebuild index: %v", err)
+	}
+	if ids, err := st.SearchBodies(ctx, "rebuildbodyword", 0); err != nil || len(ids) != 1 {
+		t.Fatalf("rebuilt index = %v/%v", ids, err)
+	}
+}
+
+func TestFTSQuery(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{"   ", ""},
+		{"go", `"go"*`},
+		{"go rust", `"go" "rust"*`},
+		{"???", ""},
+		{"a ??? b", `"a" "b"*`},
+		{"日本語", `"日本語"*`},
+		{"a b c d e f g h i j", `"a" "b" "c" "d" "e" "f" "g" "h"*`},
+	}
+	for _, c := range cases {
+		if got := ftsQuery(c.in); got != c.want {
+			t.Fatalf("ftsQuery(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	if got, want := ftsQuery(`say "hi"`), `"say" """hi"""*`; got != want {
+		t.Fatalf("quote escaping = %q, want %q", got, want)
+	}
+}
+
+const schemaV3 = schemaV2 + `
+ALTER TABLE articles ADD COLUMN starred INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX idx_articles_starred ON articles(starred, published DESC);`
+
+func TestMigrateFromV3BackfillsSearchIndex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	for _, stmt := range []string{
+		schemaV3,
+		`INSERT INTO feeds (url, title, category) VALUES ('https://v3.example/rss', 'V3', 'tech')`,
+		`INSERT INTO articles (feed_id, guid, title, content, published, first_seen)
+			VALUES (1, 'g1', 'Old headline', 'ancient bodyword', 1700000000, 1700000000)`,
+		`INSERT INTO articles (feed_id, guid, title, content, published, first_seen)
+			VALUES (1, 'g2', 'Other', 'unrelated text', 1700000001, 1700000001)`,
+		"PRAGMA user_version=3",
+	} {
+		if _, err := raw.Exec(stmt); err != nil {
+			raw.Close()
+			t.Fatalf("seed v3: %v", err)
+		}
+	}
+	raw.Close()
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open after v3: %v", err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	var version int
+	if err := st.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatalf("read version: %v", err)
+	}
+	if version != schemaVersion {
+		t.Fatalf("user_version = %d, want %d", version, schemaVersion)
+	}
+	var tables int
+	if err := st.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE name = 'articles_fts'`).Scan(&tables); err != nil {
+		t.Fatalf("read fts table: %v", err)
+	}
+	if tables != 1 {
+		t.Fatal("v3 to v4 did not create articles_fts")
+	}
+
+	arts, err := st.Articles(ctx, ListOptions{})
+	if err != nil {
+		t.Fatalf("articles: %v", err)
+	}
+	ids, err := st.SearchBodies(ctx, "bodyword", 0)
+	if err != nil {
+		t.Fatalf("SearchBodies: %v", err)
+	}
+	if len(ids) != 1 {
+		t.Fatalf("backfill hits = %v, want one of %d articles", ids, len(arts))
+	}
+	for _, a := range arts {
+		if a.GUID == "g1" && ids[0] != a.ID {
+			t.Fatalf("hit = %d, want g1 id %d", ids[0], a.ID)
+		}
+	}
+
+	// New articles after the migration enter the index through the trigger.
+	if _, err := st.SyncFeed(ctx, IngestFeed{
+		URL: "https://v3.example/rss", Title: "V3", Category: "tech",
+		Articles: []IngestArticle{{GUID: "g3", Title: "New", Link: "https://v3.example/3",
+			Content: "freshbodyword", Published: time.Now()}},
+	}); err != nil {
+		t.Fatalf("sync after migration: %v", err)
+	}
+	if ids, err := st.SearchBodies(ctx, "freshbodyword", 0); err != nil || len(ids) != 1 {
+		t.Fatalf("post-migration insert = %v/%v", ids, err)
 	}
 }

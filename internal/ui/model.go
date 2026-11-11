@@ -102,6 +102,8 @@ type Model struct {
 	category     string
 	query        string
 	searching    bool
+	bodyHits     map[int64]struct{}
+	bodyQuery    string
 
 	theme theme.Palette
 
@@ -278,6 +280,10 @@ func (m *Model) recompute() {
 		keepID = a.ID
 	}
 	q := strings.TrimSpace(m.query)
+	var hits map[int64]struct{}
+	if q != "" && m.bodyQuery == q {
+		hits = m.bodyHits
+	}
 	visible := m.visible[:0]
 	for _, a := range m.articles {
 		if m.unreadOnly && a.Read {
@@ -290,7 +296,9 @@ func (m *Model) recompute() {
 			continue
 		}
 		if q != "" && !fuzzyMatch(q, a.Title+" "+a.FeedTitle) {
-			continue
+			if _, ok := hits[a.ID]; !ok {
+				continue
+			}
 		}
 		visible = append(visible, a)
 	}
@@ -305,6 +313,26 @@ func (m *Model) recompute() {
 		}
 	}
 	m.clampCursor()
+}
+
+// minBodySearchRunes keeps a single keystroke from scanning every cached body.
+const minBodySearchRunes = 2
+
+// searchBodies schedules a body search for the current query. A store-less
+// model, or a query below minBodySearchRunes, stays on the in-memory headline
+// filter.
+func (m Model) searchBodies() tea.Cmd {
+	st := m.deps.Store
+	query := strings.TrimSpace(m.query)
+	if st == nil || len([]rune(query)) < minBodySearchRunes {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		ids, err := st.SearchBodies(ctx, query, 0)
+		return bodySearchMsg{query: query, ids: ids, err: err}
+	}
 }
 
 func (m Model) totalUnread() int {

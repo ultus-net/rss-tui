@@ -6,9 +6,8 @@ Keep a feed reader open in a dedicated terminal or tmux pane without it
 becoming another browser tab. It must be cheap to leave running, keyboard-first,
 and quiet unless something happened.
 
-Non-goals: a web UI, article archiving, full-text search across bodies, image
-rendering, or an account system. The reader reads feeds and tracks what you have
-seen.
+Non-goals: a web UI, article archiving, image rendering, or an account system.
+The reader reads feeds and tracks what you have seen.
 
 ## Decisions
 
@@ -101,6 +100,7 @@ articles(id, feed_id, guid, title, link, author, summary, content,
          published, first_seen, is_read, starred,
          UNIQUE(feed_id, guid))
 meta(key PRIMARY KEY, value)
+articles_fts USING fts5(title, content, content='articles', content_rowid='id')
 ```
 
 - `INSERT ... ON CONFLICT(feed_id, guid) DO NOTHING` makes re-fetch idempotent
@@ -118,9 +118,18 @@ meta(key PRIMARY KEY, value)
 - `PRAGMA user_version` guards against opening a newer schema with an older
   build. Version 1 to 2 adds the two validator columns with `ALTER TABLE` in one
   transaction. Version 2 to 3 adds `articles.starred` and its index the same
-  way. A fresh database is created at the current version and skips the
-  migration list. The upgrade path is tested against seeded v1 and v2 databases,
-  not only a fresh file.
+  way. Version 3 to 4 adds the FTS5 index and its triggers, then backfills it
+  from the existing rows in the same transaction. A fresh database is created at
+  the current version and skips the migration list. The upgrade path is tested
+  against seeded v1, v2 and v3 databases, not only a fresh file.
+- `articles_fts` is an external-content FTS5 table over `articles`, so the index
+  stores tokens and not a second copy of every body. `title` and `content` are
+  indexed. Triggers keep it in sync: insert and delete mirror the row, and
+  `AFTER UPDATE OF title, content` reindexes only when indexed text changes, so
+  marking an article read or starred does not churn the index. A cascading feed
+  delete reaches the delete trigger, which is why pruning a feed leaves no search
+  hits behind. `INSERT INTO articles_fts(articles_fts) VALUES('rebuild')` repairs
+  a drifted index without a resync job.
 - Feed health is read from the same rows the poll writes: `Feeds()` joins the
   article counts, so the `F` overlay and `e` errors show persisted state rather
   than this process's memory.
@@ -143,6 +152,16 @@ meta(key PRIMARY KEY, value)
 - `Enter` marks read on first open. `Space` toggles read in place.
 - Filters (`u`, `S`, `/`, `c`) rebuild the visible slice and reset the cursor to
   the top; a reload preserves the selected article by ID.
+- `/` runs two paths on purpose. Headlines and feed names are filtered in memory
+  with a fuzzy subsequence match, so the list reacts on the keystroke. Bodies
+  need the store, so a query of two or more characters also schedules
+  `SearchBodies`; the returned IDs widen the visible set when they arrive. A
+  response whose query no longer matches the input is dropped, and a reload
+  re-runs the search for the active query. A store-less model stays
+  headline-only.
+- `ftsQuery` quotes every term and stars the last one. Quoting means punctuation
+  and FTS5 operators in the input are terms, not syntax, so a user query cannot
+  raise a match error; the star makes live typing match as the word grows.
 - Marking read does not remove the row from a live unread-only view. The next
   reload does. This avoids a cursor jump while reading.
 - Layout answers one question: `single := width < 100 || manualSingle`. There is
@@ -207,6 +226,7 @@ once.
 | Cache write | One transaction per feed; error shown in status and `e`; next poll retries. A later prune or meta failure does not roll back articles already committed. |
 | Browser launch | `tea.ExecProcess` releases the terminal; failure shown in status |
 | Notification | Best effort, 5s timeout, missing binary ignored |
+| Body search | 5s timeout; a failure is shown in the status bar and the list falls back to headline matches. A malformed MATCH is impossible because every term is quoted. |
 | Settings save | Comment-preserving YAML rewrite; failure shown in status, the live value still applies for the session, and the next successful save retries the write |
 | OPML import | Validate the merged config before writing; back up to `config.yaml.bak`, then write a temp file and rename. A failure leaves the live config untouched. |
 
@@ -217,7 +237,12 @@ once.
   the feed block and appends a missing key before it.
 - Store: idempotent upsert, read-state preservation, unread/category filters,
   pruning, cascade on feed removal, meta upsert, feed health counters, error
-  adoption of renamed feeds, and a v1-to-v2 migration against a seeded database.
+  adoption of renamed feeds, a v1-to-v2 and v2-to-v3 migration against seeded
+  databases, a v3-to-v4 migration that backfills the FTS index, body search over
+  title and content with prefix matching, index survival across read-state writes,
+  index cleanup on a cascading feed prune, query sanitising for quotes,
+  operators and punctuation-only input, and a rebuild after a deliberately
+  cleared index.
 - Feed: RSS and Atom parsing, relative link resolution, script stripping,
   HTML-to-markdown, timeout and HTTP errors, input-order preservation,
   conditional requests (`If-None-Match`, `If-Modified-Since`, 304, validator
@@ -233,6 +258,8 @@ once.
   settings menu that changes the live model and reloads the same values from a
   temporary config file, plus mouse mapping for row selection after a scroll,
   preview focus, ignored clicks outside the rows, wheel clamping, and double
-  click opening.
+  click opening, and a body search that finds a body-only word through the store,
+  drops a stale response, skips one-character queries, falls back without a
+  store, flashes a search error, and re-runs on reload.
 - Theme: every palette fills every role with a valid hex colour, cycle order in
   both directions, and a legacy `meta.theme` adopted into the YAML once.

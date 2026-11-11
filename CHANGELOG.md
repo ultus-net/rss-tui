@@ -6,6 +6,13 @@ All notable changes to rss-tui are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `/` now searches article bodies as well as headlines and feed names. The cache
+  gets an FTS5 index, kept in sync by triggers and backfilled when an existing
+  database upgrades. Headline matches stay instant; body matches arrive one
+  keystroke behind, and a one-character query stays headline-only.
+
 ## [0.4.0] - 2026-11-12
 
 ### Added

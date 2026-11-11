@@ -1081,3 +1081,175 @@ func TestMouseSinglePaneClickSelectsVisibleList(t *testing.T) {
 		t.Fatalf("single-pane preview click changed focus to %v", m.focus)
 	}
 }
+
+func TestSearchMatchesArticleBodies(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	defer st.Close()
+	if _, err := st.SyncFeed(ctx, store.IngestFeed{
+		URL: "https://example.com/rss", Title: "Example", Category: "tech",
+		Articles: []store.IngestArticle{
+			{GUID: "g1", Title: "Genome notes", Link: "https://example.com/1",
+				Content: "A zebrafish study of regeneration.", Published: time.Now()},
+			{GUID: "g2", Title: "Compiler news", Link: "https://example.com/2",
+				Content: "Register allocation changes.", Published: time.Now().Add(-time.Hour)},
+		},
+	}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	arts, err := st.Articles(ctx, store.ListOptions{})
+	if err != nil {
+		t.Fatalf("articles: %v", err)
+	}
+	feeds, _ := st.Feeds(ctx)
+	cfg := &config.Config{
+		RefreshInterval: config.Duration(10 * time.Minute),
+		Feeds:           []config.Feed{{URL: "https://example.com/rss", Title: "Example", Category: "tech"}},
+	}
+	m := New(Deps{Cfg: cfg, Store: st, Theme: theme.Get("nord")})
+	m.width, m.height, m.ready = 120, 30, true
+	model, _ := m.Update(loadedMsg{articles: arts, feeds: feeds})
+	m = model.(Model)
+	if len(m.visible) != 2 {
+		t.Fatalf("visible after load = %d", len(m.visible))
+	}
+
+	m, _ = keyPress(t, m, "/")
+	for i, r := range "zebrafish" {
+		var cmd tea.Cmd
+		m, cmd = keyPress(t, m, string(r))
+		if i == 0 {
+			if cmd != nil {
+				t.Fatalf("a one-character query scheduled a body search")
+			}
+			continue
+		}
+		if cmd == nil {
+			t.Fatalf("typing %q scheduled no body search", r)
+		}
+		model, _ := m.Update(cmd())
+		m = model.(Model)
+	}
+	if len(m.visible) != 1 || m.visible[0].GUID != "g1" {
+		t.Fatalf("body search visible = %+v", m.visible)
+	}
+
+	// Clearing the query restores the list and forgets the hits.
+	m, _ = keyPress(t, m, "esc")
+	if m.query != "" || m.bodyQuery != "" || len(m.bodyHits) != 0 {
+		t.Fatalf("clear: query=%q bodyQuery=%q hits=%d", m.query, m.bodyQuery, len(m.bodyHits))
+	}
+	if len(m.visible) != 2 {
+		t.Fatalf("visible after clear = %d", len(m.visible))
+	}
+}
+
+func TestSearchDropsStaleBodyResults(t *testing.T) {
+	m := testModel(120, 30)
+	m.query = "zeb"
+	m.recompute()
+
+	model, _ := m.Update(bodySearchMsg{query: "zebr", ids: []int64{1}})
+	m = model.(Model)
+	if m.bodyQuery != "" || len(m.bodyHits) != 0 {
+		t.Fatalf("stale response stored: query=%q hits=%d", m.bodyQuery, len(m.bodyHits))
+	}
+	if len(m.visible) != 0 {
+		t.Fatalf("stale hits changed the list: %d", len(m.visible))
+	}
+
+	model, _ = m.Update(bodySearchMsg{query: "zeb", ids: []int64{2}})
+	m = model.(Model)
+	if len(m.visible) != 1 || m.visible[0].ID != 2 {
+		t.Fatalf("body hit did not widen the list: %+v", m.visible)
+	}
+}
+
+func TestSearchBodiesSkipsShortQueriesAndMissingStore(t *testing.T) {
+	m := testModel(120, 30)
+	if m.deps.Store != nil {
+		t.Fatal("fixture should have no store")
+	}
+	for _, query := range []string{"g", "  ", ""} {
+		m.query = query
+		if cmd := m.searchBodies(); cmd != nil {
+			t.Fatalf("query %q scheduled a body search", query)
+		}
+	}
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	defer st.Close()
+	m.deps.Store = st
+	m.query = "go"
+	cmd := m.searchBodies()
+	if cmd == nil {
+		t.Fatal("two-character query did not schedule a body search")
+	}
+	msg, ok := cmd().(bodySearchMsg)
+	if !ok || msg.query != "go" {
+		t.Fatalf("search message = %#v", msg)
+	}
+}
+
+func TestSearchBodyErrorFlashesAndDropsHits(t *testing.T) {
+	oldTTL := statusTTL
+	statusTTL = time.Millisecond
+	defer func() { statusTTL = oldTTL }()
+
+	m := testModel(120, 30)
+	m.query = "zeb"
+	m.bodyQuery = "zeb"
+	m.bodyHits = map[int64]struct{}{1: {}}
+	m.recompute()
+	if len(m.visible) != 1 {
+		t.Fatalf("fixture visible = %d", len(m.visible))
+	}
+
+	model, _ := m.Update(bodySearchMsg{query: "zeb", err: fmt.Errorf("db closed")})
+	m = model.(Model)
+	if !strings.Contains(m.status, "search: db closed") {
+		t.Fatalf("status = %q", m.status)
+	}
+	if len(m.bodyHits) != 0 || len(m.visible) != 0 {
+		t.Fatalf("hits survived an error: hits=%d visible=%d", len(m.bodyHits), len(m.visible))
+	}
+}
+
+func TestLoadReschedulesBodySearch(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	defer st.Close()
+	m := testModel(120, 30)
+	m.deps.Store = st
+	m.query = "zzz"
+	// Hits from a query the user has moved past must not survive a reload.
+	m.bodyQuery = "zeb"
+	m.bodyHits = map[int64]struct{}{1: {}}
+	m.recompute()
+	if len(m.visible) != 0 {
+		t.Fatalf("stale hits survived the new query: %d visible", len(m.visible))
+	}
+	model, cmd := m.Update(loadedMsg{articles: m.articles})
+	m = model.(Model)
+	if cmd == nil {
+		t.Fatal("a reload with an active query did not re-run the body search")
+	}
+	msg, ok := cmd().(bodySearchMsg)
+	if !ok || msg.query != "zzz" {
+		t.Fatalf("reload search message = %#v", msg)
+	}
+	// The fresh response replaces the stale hits rather than merging with them.
+	model, _ = m.Update(msg)
+	m = model.(Model)
+	if m.bodyQuery != "zzz" || len(m.bodyHits) != len(msg.ids) {
+		t.Fatalf("reload did not replace hits: query=%q hits=%d", m.bodyQuery, len(m.bodyHits))
+	}
+}

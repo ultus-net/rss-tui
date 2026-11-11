@@ -40,6 +40,13 @@ type browserDoneMsg struct{ err error }
 
 type settingsSavedMsg struct{ err error }
 
+// bodySearchMsg carries the article IDs whose title or body matched query.
+type bodySearchMsg struct {
+	query string
+	ids   []int64
+	err   error
+}
+
 type yankDoneMsg struct {
 	label string
 	err   error
@@ -87,7 +94,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastUpdated = msg.lastUpdated
 		}
 		m.recompute()
-		return m, nil
+		return m, m.searchBodies()
 
 	case beginRefreshMsg:
 		return m, m.startRefresh()
@@ -138,6 +145,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case settingsSavedMsg:
 		if msg.err != nil {
 			return m, m.flash("could not save settings: " + msg.err.Error())
+		}
+		return m, nil
+
+	case bodySearchMsg:
+		if msg.query != strings.TrimSpace(m.query) {
+			return m, nil // a response for a query the user has moved past
+		}
+		m.bodyQuery = msg.query
+		m.bodyHits = make(map[int64]struct{}, len(msg.ids))
+		for _, id := range msg.ids {
+			m.bodyHits[id] = struct{}{}
+		}
+		m.recompute()
+		if msg.err != nil {
+			return m, m.flash("search: " + msg.err.Error())
 		}
 		return m, nil
 
@@ -448,6 +470,8 @@ func (m Model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		m.searching = false
 		m.query = ""
+		m.bodyHits = nil
+		m.bodyQuery = ""
 		m.cursor = 0
 		m.offset = 0
 		m.recompute()
@@ -468,6 +492,8 @@ func (m Model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.recompute()
 	case "ctrl+u":
 		m.query = ""
+		m.bodyHits = nil
+		m.bodyQuery = ""
 		m.cursor = 0
 		m.offset = 0
 		m.recompute()
@@ -484,7 +510,7 @@ func (m Model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.recompute()
 		}
 	}
-	return m, nil
+	return m, m.searchBodies()
 }
 
 func (m *Model) moveFocus(delta int) {
@@ -860,7 +886,7 @@ func (m Model) viewHelp(st styles) string {
 		{"y / Y", "copy link / markdown link"},
 		{"r", "refresh all feeds"},
 		{"u", "all / unread only"},
-		{"/", "fuzzy search headlines"},
+		{"/", "search headlines and bodies"},
 		{"m", "mark visible as read"},
 		{"c", "cycle category"},
 		{"t", "cycle colour theme"},
