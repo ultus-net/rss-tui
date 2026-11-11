@@ -6,6 +6,12 @@ All notable changes to rss-tui are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `s` stars the selected article and `S` filters the list to starred articles.
+  The starred filter composes with `u`, `c`, and `/`. Stars are stored in SQLite
+  and survive the per-feed cache prune.
+
 ## [0.2.0] - 2026-11-12
 
 ### Added

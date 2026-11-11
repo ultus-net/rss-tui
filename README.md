@@ -80,6 +80,8 @@ rss-tui · 14:02 · 3 new · 12 unread · 4 feeds · refresh 10m
 | `h` / `l` | Focus list / preview pane (also `←` / `→`) |
 | `Enter` | Open the preview and mark the article read; `Enter` again or `Esc` returns to the list |
 | `Space` | Toggle read / unread without leaving the list |
+| `s` | Star / unstar the selected article |
+| `S` | Toggle the starred-only filter |
 | `o` | Open the article link in the configured browser |
 | `y` / `Y` | Copy the link / copy a markdown link to the terminal clipboard |
 | `r` | Refresh every feed now |
@@ -97,6 +99,11 @@ rss-tui · 14:02 · 3 new · 12 unread · 4 feeds · refresh 10m
 Search: typing filters as you type, `Enter` keeps the filter, `Esc` clears it.
 Under the unread-only filter an article you just read stays visible until the
 next refresh, so the cursor does not jump out from under you.
+
+A star is user intent, not cache. The per-feed article cap counts only unstarred
+rows, so a starred article survives pruning however old it gets. Removing a feed
+from the config still drops its articles, starred or not, because the config is
+the source of truth. Stars are local: they are not published back to the feed.
 
 `y` and `Y` use OSC 52, so the clipboard works inside tmux and over SSH. In
 tmux, enable `set -g set-clipboard on` for the sequence to reach the outer

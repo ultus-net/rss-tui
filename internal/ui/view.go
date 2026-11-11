@@ -231,6 +231,27 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		cmd := m.markRead(ids, true)
 		return m, tea.Batch(cmd, m.flash(fmt.Sprintf("marked %d read", len(ids))))
+	case "s":
+		a := m.selected()
+		if a == nil {
+			return m, nil
+		}
+		starred := !a.Starred
+		cmd := m.setStarred([]int64{a.ID}, starred)
+		label := "unstarred"
+		if starred {
+			label = "starred"
+		}
+		return m, tea.Batch(cmd, m.flash(label))
+	case "S":
+		m.starredOnly = !m.starredOnly
+		m.cursor = 0
+		m.offset = 0
+		m.recompute()
+		if m.starredOnly {
+			return m, m.flash("starred only")
+		}
+		return m, m.flash("all articles")
 	case "o":
 		return m, m.openInBrowser()
 	case "enter":
@@ -424,14 +445,17 @@ func (m Model) View() string {
 }
 
 func (m Model) listHeader() string {
-	label := "All articles"
-	if m.unreadOnly {
-		label = "Unread"
-	}
+	parts := []string{"All articles"}
 	if m.category != "" {
-		label = titleCase(m.category)
+		parts = []string{titleCase(m.category)}
 	}
-	header := fmt.Sprintf("%s · %d", label, len(m.visible))
+	if m.starredOnly {
+		parts = append(parts, "starred")
+	}
+	if m.unreadOnly {
+		parts = append(parts, "unread")
+	}
+	header := fmt.Sprintf("%s · %d", strings.Join(parts, " · "), len(m.visible))
 	if m.query != "" {
 		header += " · /" + m.query
 	}
@@ -475,6 +499,10 @@ func (m Model) emptyText() string {
 		return "no matches for /" + m.query
 	case m.category != "":
 		return "nothing in " + m.category
+	case m.starredOnly && m.unreadOnly:
+		return "no unread starred articles"
+	case m.starredOnly:
+		return "no starred articles"
 	case m.unreadOnly:
 		return "no unread articles"
 	case len(m.articles) == 0:
@@ -518,6 +546,9 @@ func renderRow(a store.Article, width int, selected bool, st styles) string {
 		titleW = 4
 	}
 	title := textutil.Truncate(a.Title, titleW)
+	if a.Starred {
+		title = textutil.Truncate("★ "+a.Title, titleW)
+	}
 	gap := width - 4 - textutil.Width(title) - textutil.Width(tag)
 	if gap < 1 {
 		gap = 1
@@ -622,6 +653,9 @@ func (m Model) renderStatus(st styles) string {
 		if m.unreadOnly {
 			segs = append(segs, st.statusText(m.theme.Warning).Render("unread only"))
 		}
+		if m.starredOnly {
+			segs = append(segs, st.statusText(m.theme.AccentAlt).Render("starred only"))
+		}
 		if m.category != "" {
 			segs = append(segs, st.statusText(m.theme.AccentAlt).Render(m.category))
 		}
@@ -679,6 +713,8 @@ func (m Model) viewHelp(st styles) string {
 		{"h / l", "list / preview pane"},
 		{"enter", "open preview (marks read)"},
 		{"space", "toggle read / unread"},
+		{"s", "star / unstar article"},
+		{"S", "starred only"},
 		{"esc", "back · clear filter"},
 		{"o", "open in browser"},
 		{"y / Y", "copy link / markdown link"},

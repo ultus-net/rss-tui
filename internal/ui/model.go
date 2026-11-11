@@ -24,9 +24,12 @@ import (
 
 const (
 	narrowWidth  = 100
-	statusTTL    = 5 * time.Second
 	spinnerEvery = 120 * time.Millisecond
 )
+
+// statusTTL is a var so tests can run the flash command without a five-second
+// wait.
+var statusTTL = 5 * time.Second
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
@@ -84,6 +87,7 @@ type Model struct {
 	focus        focusMode
 	manualSingle bool
 	unreadOnly   bool
+	starredOnly  bool
 	category     string
 	query        string
 	searching    bool
@@ -263,6 +267,9 @@ func (m *Model) recompute() {
 		if m.unreadOnly && a.Read {
 			continue
 		}
+		if m.starredOnly && !a.Starred {
+			continue
+		}
 		if m.category != "" && a.FeedCategory != m.category {
 			continue
 		}
@@ -319,6 +326,37 @@ func (m *Model) markRead(ids []int64, read bool) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := st.MarkRead(ctx, ids, read); err != nil {
+			return actionErrMsg{err: err}
+		}
+		return nil
+	}
+}
+
+func (m *Model) setStar(id int64, starred bool) {
+	for i := range m.articles {
+		if m.articles[i].ID == id {
+			m.articles[i].Starred = starred
+		}
+	}
+	for i := range m.visible {
+		if m.visible[i].ID == id {
+			m.visible[i].Starred = starred
+		}
+	}
+}
+
+func (m *Model) setStarred(ids []int64, starred bool) tea.Cmd {
+	if len(ids) == 0 {
+		return nil
+	}
+	for _, id := range ids {
+		m.setStar(id, starred)
+	}
+	st := m.deps.Store
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := st.SetStarred(ctx, ids, starred); err != nil {
 			return actionErrMsg{err: err}
 		}
 		return nil

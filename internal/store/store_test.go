@@ -152,6 +152,163 @@ func TestPruneKeepsNewestPerFeed(t *testing.T) {
 	}
 }
 
+func TestStarredRoundTripAndFilter(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	now := time.Now()
+	if _, err := st.SyncFeed(ctx, IngestFeed{
+		URL: "https://example.com/rss", Title: "E", Category: "tech",
+		Articles: []IngestArticle{article("a", now), article("b", now.Add(time.Hour))},
+	}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	arts, _ := st.Articles(ctx, ListOptions{})
+	if len(arts) != 2 {
+		t.Fatalf("articles = %d", len(arts))
+	}
+	for _, a := range arts {
+		if a.Starred {
+			t.Fatalf("fresh article is starred: %+v", a)
+		}
+	}
+
+	oldest := arts[1]
+	for _, a := range arts {
+		if a.GUID == "a" {
+			oldest = a
+		}
+	}
+	if err := st.SetStarred(ctx, []int64{oldest.ID}, true); err != nil {
+		t.Fatalf("SetStarred: %v", err)
+	}
+	starred, err := st.Articles(ctx, ListOptions{StarredOnly: true})
+	if err != nil || len(starred) != 1 {
+		t.Fatalf("starred filter = %d, err %v", len(starred), err)
+	}
+	if starred[0].ID != oldest.ID || !starred[0].Starred {
+		t.Fatalf("starred filter returned %+v", starred[0])
+	}
+
+	if err := st.MarkRead(ctx, []int64{oldest.ID}, true); err != nil {
+		t.Fatalf("MarkRead: %v", err)
+	}
+	combo, err := st.Articles(ctx, ListOptions{StarredOnly: true, UnreadOnly: true})
+	if err != nil || len(combo) != 0 {
+		t.Fatalf("starred+unread = %d, err %v", len(combo), err)
+	}
+
+	if err := st.SetStarred(ctx, []int64{oldest.ID}, false); err != nil {
+		t.Fatalf("unstar: %v", err)
+	}
+	starred, err = st.Articles(ctx, ListOptions{StarredOnly: true})
+	if err != nil || len(starred) != 0 {
+		t.Fatalf("unstar left %d rows, err %v", len(starred), err)
+	}
+	arts, _ = st.Articles(ctx, ListOptions{})
+	for _, a := range arts {
+		if a.ID != oldest.ID {
+			continue
+		}
+		if !a.Read || a.Starred {
+			t.Fatalf("unstar disturbed read state or kept the star: %+v", a)
+		}
+	}
+}
+
+func TestPruneKeepsStarred(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	now := time.Now()
+	var items []IngestArticle
+	for i := 0; i < 5; i++ {
+		items = append(items, article(fmt.Sprintf("g%d", i), now.Add(time.Duration(i)*time.Minute)))
+	}
+	if _, err := st.SyncFeed(ctx, IngestFeed{URL: "https://example.com/rss", Title: "E", Category: "tech", Articles: items}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	arts, _ := st.Articles(ctx, ListOptions{})
+	var oldest int64
+	for _, a := range arts {
+		if a.GUID == "g0" {
+			oldest = a.ID
+		}
+	}
+	if err := st.SetStarred(ctx, []int64{oldest}, true); err != nil {
+		t.Fatalf("SetStarred: %v", err)
+	}
+	if err := st.Prune(ctx, 2); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	arts, err := st.Articles(ctx, ListOptions{})
+	if err != nil {
+		t.Fatalf("articles: %v", err)
+	}
+	if len(arts) != 3 {
+		t.Fatalf("after prune = %d, want the starred row plus the cap", len(arts))
+	}
+	guids := []string{arts[0].GUID, arts[1].GUID, arts[2].GUID}
+	want := []string{"g4", "g3", "g0"}
+	for i := range want {
+		if guids[i] != want[i] {
+			t.Fatalf("kept %v, want %v", guids, want)
+		}
+	}
+	if !arts[2].Starred {
+		t.Fatalf("the surviving old row lost its star: %+v", arts[2])
+	}
+}
+
+func TestPruneKeepsAllStarred(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	now := time.Now()
+	var items []IngestArticle
+	for i := 0; i < 3; i++ {
+		items = append(items, article(fmt.Sprintf("s%d", i), now.Add(time.Duration(i)*time.Minute)))
+	}
+	if _, err := st.SyncFeed(ctx, IngestFeed{URL: "https://example.com/rss", Title: "E", Category: "tech", Articles: items}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	arts, _ := st.Articles(ctx, ListOptions{})
+	ids := make([]int64, 0, len(arts))
+	for _, a := range arts {
+		ids = append(ids, a.ID)
+	}
+	if err := st.SetStarred(ctx, ids, true); err != nil {
+		t.Fatalf("SetStarred: %v", err)
+	}
+	if err := st.Prune(ctx, 1); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	arts, err := st.Articles(ctx, ListOptions{})
+	if err != nil {
+		t.Fatalf("articles: %v", err)
+	}
+	if len(arts) != 3 {
+		t.Fatalf("prune deleted a starred row: %d left", len(arts))
+	}
+	for _, a := range arts {
+		if !a.Starred {
+			t.Fatalf("a surviving row lost its star: %+v", a)
+		}
+	}
+}
+
+func TestFreshSchemaCreatesIndexes(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	for _, name := range []string{"idx_articles_published", "idx_articles_unread", "idx_articles_starred"} {
+		var n int
+		if err := st.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?`, name).Scan(&n); err != nil {
+			t.Fatalf("read index %s: %v", name, err)
+		}
+		if n != 1 {
+			t.Fatalf("fresh schema is missing %s", name)
+		}
+	}
+}
+
 func TestMetaAndFeedErrors(t *testing.T) {
 	ctx := context.Background()
 	st := newTestStore(t)
@@ -416,6 +573,109 @@ func TestMigrateFromV1KeepsData(t *testing.T) {
 	feeds, _ = st.Feeds(ctx)
 	if feeds[0].ETag != `"x"` {
 		t.Fatalf("validators unwritable after migration: %+v", feeds[0])
+	}
+
+	arts, err := st.Articles(ctx, ListOptions{})
+	if err != nil || len(arts) != 1 {
+		t.Fatalf("articles after migration: %v %d", err, len(arts))
+	}
+	if arts[0].Starred {
+		t.Fatal("migrated article is starred")
+	}
+	if err := st.SetStarred(ctx, []int64{arts[0].ID}, true); err != nil {
+		t.Fatalf("SetStarred after migration: %v", err)
+	}
+	starred, err := st.Articles(ctx, ListOptions{StarredOnly: true})
+	if err != nil || len(starred) != 1 {
+		t.Fatalf("starred after migration: %v %d", err, len(starred))
+	}
+}
+
+const schemaV2 = `
+CREATE TABLE feeds (
+	id            INTEGER PRIMARY KEY AUTOINCREMENT,
+	url           TEXT NOT NULL UNIQUE,
+	title         TEXT NOT NULL DEFAULT '',
+	category      TEXT NOT NULL DEFAULT 'general',
+	last_fetched  INTEGER,
+	last_error    TEXT NOT NULL DEFAULT '',
+	etag          TEXT NOT NULL DEFAULT '',
+	last_modified TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE articles (
+	id         INTEGER PRIMARY KEY AUTOINCREMENT,
+	feed_id    INTEGER NOT NULL REFERENCES feeds(id) ON DELETE CASCADE,
+	guid       TEXT NOT NULL,
+	title      TEXT NOT NULL,
+	link       TEXT NOT NULL DEFAULT '',
+	author     TEXT NOT NULL DEFAULT '',
+	summary    TEXT NOT NULL DEFAULT '',
+	content    TEXT NOT NULL DEFAULT '',
+	published  INTEGER NOT NULL,
+	first_seen INTEGER NOT NULL,
+	is_read    INTEGER NOT NULL DEFAULT 0,
+	UNIQUE(feed_id, guid)
+);
+CREATE TABLE meta (
+	key   TEXT PRIMARY KEY,
+	value TEXT NOT NULL
+);`
+
+func TestMigrateFromV2AddsStarred(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	for _, stmt := range []string{
+		schemaV2,
+		`INSERT INTO feeds (url, title, category, etag) VALUES ('https://v2.example/rss', 'V2', 'tech', '"e"')`,
+		`INSERT INTO articles (feed_id, guid, title, published, first_seen, is_read)
+			VALUES (1, 'g1', 'Kept', 1700000000, 1700000000, 1)`,
+		"PRAGMA user_version=2",
+	} {
+		if _, err := raw.Exec(stmt); err != nil {
+			raw.Close()
+			t.Fatalf("seed v2: %v", err)
+		}
+	}
+	raw.Close()
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open after v2: %v", err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	var version int
+	if err := st.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatalf("read version: %v", err)
+	}
+	if version != 3 {
+		t.Fatalf("user_version = %d, want 3", version)
+	}
+	var indexes int
+	if err := st.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_articles_starred'`).Scan(&indexes); err != nil {
+		t.Fatalf("read index: %v", err)
+	}
+	if indexes != 1 {
+		t.Fatal("v2 to v3 did not create the starred index")
+	}
+	arts, err := st.Articles(ctx, ListOptions{})
+	if err != nil || len(arts) != 1 {
+		t.Fatalf("articles after v2 upgrade: %v %d", err, len(arts))
+	}
+	if !arts[0].Read || arts[0].Starred {
+		t.Fatalf("v2 read state or starred default wrong: %+v", arts[0])
+	}
+	feeds, _ := st.Feeds(ctx)
+	if feeds[0].ETag != `"e"` {
+		t.Fatalf("v2 validators lost: %+v", feeds[0])
+	}
+	if err := st.SetStarred(ctx, []int64{arts[0].ID}, true); err != nil {
+		t.Fatalf("SetStarred: %v", err)
 	}
 }
 
