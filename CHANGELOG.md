@@ -6,6 +6,8 @@ All notable changes to rss-tui are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-12
+
 ### Added
 
 - The list takes mouse input: a click selects the row under the pointer, a
