@@ -17,6 +17,8 @@ import (
 
 type loadedMsg struct {
 	articles    []store.Article
+	feeds       []store.Feed
+	feedErrors  []feedError
 	lastUpdated time.Time
 	themeName   string
 	err         error
@@ -39,6 +41,11 @@ type statusClearMsg struct{ seq int }
 type browserDoneMsg struct{ err error }
 
 type themeSavedMsg struct{ err error }
+
+type yankDoneMsg struct {
+	label string
+	err   error
+}
 
 type actionErrMsg struct{ err error }
 
@@ -65,11 +72,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 
 	case loadedMsg:
+		first := !m.ready
 		m.ready = true
 		if msg.err != nil {
 			return m, m.flash("cache: " + msg.err.Error())
 		}
 		m.articles = msg.articles
+		m.feeds = msg.feeds
+		if first && len(msg.feedErrors) > 0 {
+			m.feedErrors = msg.feedErrors
+		}
 		if !msg.lastUpdated.IsZero() {
 			m.lastUpdated = msg.lastUpdated
 		}
@@ -85,13 +97,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.startRefresh()
 
 	case tickMsg:
-		cmds := []tea.Cmd{m.nextTick()}
-		if time.Since(m.lastRefreshStart) >= m.deps.Cfg.RefreshInterval.Std()/2 {
-			if cmd := m.startRefresh(); cmd != nil {
-				cmds = append(cmds, cmd)
-			}
+		if cmd := m.startRefresh(); cmd != nil {
+			return m, cmd
 		}
-		return m, tea.Batch(cmds...)
+		// A manual refresh is already running; it reschedules on completion.
+		return m, nil
 
 	case spinnerTickMsg:
 		if !m.refreshing {
@@ -106,7 +116,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !msg.at.IsZero() {
 			m.lastUpdated = msg.at
 		}
-		cmds := []tea.Cmd{m.loadCmd()}
+		cmds := []tea.Cmd{m.loadCmd(), m.nextTick()}
 		switch {
 		case msg.newCount > 0 && len(msg.errors) > 0:
 			cmds = append(cmds, m.flash(fmt.Sprintf("%d new · %d feeds failed", msg.newCount, len(msg.errors))))
@@ -134,6 +144,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.flash("could not save theme: " + msg.err.Error())
 		}
 		return m, nil
+
+	case yankDoneMsg:
+		if msg.err != nil {
+			return m, m.flash("clipboard: " + msg.err.Error())
+		}
+		return m, m.flash(msg.label)
 
 	case actionErrMsg:
 		if msg.err != nil {
@@ -167,8 +183,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.flash("no feed errors")
 		}
 		m.overlay = overlayErrors
+	case "F":
+		m.overlay = overlayFeeds
 	case "t":
 		return m, m.cycleTheme()
+	case "y":
+		return m, m.yank(false)
+	case "Y":
+		return m, m.yank(true)
 	case "tab":
 		m.manualSingle = !m.manualSingle
 		if m.singlePane() && m.selected() == nil {
@@ -254,6 +276,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.moveFocus(1)
 	case "k", "up":
 		m.moveFocus(-1)
+	case "n":
+		if !m.nextUnread(1) {
+			return m, m.flash("no unread below")
+		}
+	case "N":
+		if !m.nextUnread(-1) {
+			return m, m.flash("no unread above")
+		}
 	case "g", "home":
 		m.jumpEdge(-1)
 	case "G", "end":
@@ -372,6 +402,8 @@ func (m Model) View() string {
 		return m.viewHelp(st)
 	case overlayErrors:
 		return m.viewErrors(st)
+	case overlayFeeds:
+		return m.viewFeeds(st)
 	}
 
 	bodyHeight := m.paneHeight()
@@ -537,25 +569,17 @@ func (m Model) renderPreview(w, h int, st styles, active bool) string {
 		meta += " · " + a.Author
 	}
 
-	footer := "o open · esc back"
-	if m.focus == focusList && !m.singlePane() {
-		footer = "enter open · o browser"
+	footer := "enter open · o browser"
+	if m.focus == focusPreview {
+		footer = "o open · esc back · j/k scroll"
 	}
 	bodyH := innerH - len(titleLines) - 1 - 1 - 1
 	if bodyH < 1 {
 		bodyH = 1
 	}
 	maxScroll := len(m.preview.lines) - bodyH
-	if maxScroll > 0 {
-		pct := 0
-		if maxScroll > 0 {
-			pct = m.previewScroll * 100 / maxScroll
-		}
-		if m.focus == focusPreview || m.singlePane() {
-			footer = fmt.Sprintf("o open · esc back · j/k scroll %d%%", pct)
-		} else {
-			footer = fmt.Sprintf("enter open · j/k scroll %d%%", pct)
-		}
+	if maxScroll > 0 && m.focus == focusPreview {
+		footer = fmt.Sprintf("%s %d%%", footer, m.previewScroll*100/maxScroll)
 	}
 
 	lines := make([]string, 0, innerH)
@@ -649,6 +673,7 @@ func (m Model) viewHelp(st styles) string {
 	rows := [][2]string{
 		{"j / ↓", "next article"},
 		{"k / ↑", "previous article"},
+		{"n / N", "next / previous unread"},
 		{"g / G", "top / bottom"},
 		{"ctrl+d/u", "half page"},
 		{"h / l", "list / preview pane"},
@@ -656,6 +681,7 @@ func (m Model) viewHelp(st styles) string {
 		{"space", "toggle read / unread"},
 		{"esc", "back · clear filter"},
 		{"o", "open in browser"},
+		{"y / Y", "copy link / markdown link"},
 		{"r", "refresh all feeds"},
 		{"u", "all / unread only"},
 		{"/", "fuzzy search headlines"},
@@ -663,6 +689,7 @@ func (m Model) viewHelp(st styles) string {
 		{"c", "cycle category"},
 		{"t", "cycle colour theme"},
 		{"tab", "single-pane toggle"},
+		{"F", "feed health"},
 		{"e", "feed error details"},
 		{"?", "close this help"},
 		{"q", "quit"},
@@ -707,7 +734,7 @@ func (m Model) viewErrors(st styles) string {
 	b.WriteString(st.title().Render("feed errors"))
 	b.WriteString("\n\n")
 	if len(m.feedErrors) == 0 {
-		b.WriteString(st.faint().Render("No feed errors reported in the last refresh."))
+		b.WriteString(st.faint().Render("No feed errors recorded."))
 	}
 	for _, fe := range m.feedErrors {
 		b.WriteString(st.tag().Render(textutil.Truncate(fe.Feed, textW)))
@@ -715,6 +742,51 @@ func (m Model) viewErrors(st styles) string {
 		for _, line := range textutil.Wrap(fe.Err, textW) {
 			b.WriteString(st.failure().Render(line))
 			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString(st.faint().Render("any key to close"))
+	box := st.helpBox().Render(strings.TrimRight(b.String(), "\n"))
+	box = fitHeight(box, m.height-1)
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
+func (m Model) viewFeeds(st styles) string {
+	width := 88
+	if m.width-8 < width {
+		width = m.width - 8
+	}
+	if width < 34 {
+		width = 34
+	}
+	textW := width - 4
+	var b strings.Builder
+	b.WriteString(st.title().Render("feed health"))
+	b.WriteString("\n\n")
+	if len(m.feeds) == 0 {
+		b.WriteString(st.faint().Render("No feeds cached yet. Press r to refresh."))
+		b.WriteString("\n")
+	}
+	for _, f := range m.feeds {
+		name := f.Title
+		if strings.TrimSpace(name) == "" {
+			name = f.URL
+		}
+		meta := fmt.Sprintf("%s · %d unread · %d cached · ", f.Category, f.Unread, f.Articles)
+		if f.LastFetched.IsZero() {
+			meta += "never fetched"
+		} else {
+			meta += "fetched " + textutil.RelativeTime(f.LastFetched, time.Now())
+		}
+		b.WriteString(st.tag().Render(textutil.Truncate(name, textW)))
+		b.WriteString("\n")
+		b.WriteString(st.meta().Render(textutil.Truncate(meta, textW)))
+		b.WriteString("\n")
+		if f.LastError != "" {
+			for _, line := range textutil.Wrap(f.LastError, textW) {
+				b.WriteString(st.failure().Render(line))
+				b.WriteString("\n")
+			}
 		}
 		b.WriteString("\n")
 	}

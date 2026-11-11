@@ -6,6 +6,40 @@ All notable changes to rss-tui are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `n` / `N` jump to the next or previous unread article, the triage keys a
+  reader of this shape needs.
+- `y` copies the article link and `Y` copies a markdown link through OSC 52, so
+  the clipboard works over SSH and inside tmux without a new dependency.
+- `F` opens a feed-health overlay listing every cached feed with its category,
+  unread and cached counts, last successful poll, and last error.
+- Conditional fetching: each feed's `ETag` and `Last-Modified` are stored and
+  replayed, so a `304 Not Modified` skips the body read, parse, markdown
+  conversion, and prune.
+- `rss-tui export-opml` and `rss-tui import-opml` move subscriptions between
+  readers. Import merges by URL by default (`--replace` starts clean), backs up
+  the previous config to `config.yaml.bak`, and writes atomically.
+- `passive_unread_only` config key, so the ticker can show only what is unread.
+
+### Changed
+
+- Feed errors recorded in SQLite now surface after a restart, in the status bar
+  and under `e`.
+- The refresh timer is scheduled from the end of a poll rather than from its
+  start, so a slow poll no longer causes back-to-back refreshes.
+- The preview footer no longer advertises `j/k scroll` while that key moves the
+  article cursor.
+- Passive mode reserves room for failure rows before it trims articles to the
+  pane height.
+
+### Fixed
+
+- `RecordFeedError` now adopts a feed's configured title and category, so a
+  renamed feed is correct even while it keeps failing.
+- A feed that returns `304` now clears its stored error and adopts config
+  changes without discarding the title parsed from its last full response.
+
 ## [0.1.0] - 2026-11-12
 
 ### Added

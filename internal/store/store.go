@@ -14,16 +14,18 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 const schema = `
 CREATE TABLE IF NOT EXISTS feeds (
-	id           INTEGER PRIMARY KEY AUTOINCREMENT,
-	url          TEXT NOT NULL UNIQUE,
-	title        TEXT NOT NULL DEFAULT '',
-	category     TEXT NOT NULL DEFAULT 'general',
-	last_fetched INTEGER,
-	last_error   TEXT NOT NULL DEFAULT ''
+	id            INTEGER PRIMARY KEY AUTOINCREMENT,
+	url           TEXT NOT NULL UNIQUE,
+	title         TEXT NOT NULL DEFAULT '',
+	category      TEXT NOT NULL DEFAULT 'general',
+	last_fetched  INTEGER,
+	last_error    TEXT NOT NULL DEFAULT '',
+	etag          TEXT NOT NULL DEFAULT '',
+	last_modified TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS articles (
@@ -50,14 +52,27 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 `
 
-// Feed is a subscription row.
+// migrations[i] upgrades a database at version i+1 to version i+2.
+// A fresh database gets the current schema directly and skips this list.
+var migrations = [][]string{
+	{
+		`ALTER TABLE feeds ADD COLUMN etag TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE feeds ADD COLUMN last_modified TEXT NOT NULL DEFAULT ''`,
+	},
+}
+
+// Feed is a subscription row with its cache counters.
 type Feed struct {
-	ID          int64
-	URL         string
-	Title       string
-	Category    string
-	LastFetched time.Time
-	LastError   string
+	ID           int64
+	URL          string
+	Title        string
+	Category     string
+	LastFetched  time.Time
+	LastError    string
+	ETag         string
+	LastModified string
+	Unread       int
+	Articles     int
 }
 
 // Article is a cached item joined with its feed metadata.
@@ -79,10 +94,12 @@ type Article struct {
 
 // IngestFeed is one fetch result ready to persist.
 type IngestFeed struct {
-	URL      string
-	Title    string
-	Category string
-	Articles []IngestArticle
+	URL          string
+	Title        string
+	Category     string
+	ETag         string
+	LastModified string
+	Articles     []IngestArticle
 }
 
 // IngestArticle is one parsed article.
@@ -152,13 +169,43 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	if version > schemaVersion {
 		return fmt.Errorf("store: database schema v%d is newer than this build (v%d)", version, schemaVersion)
 	}
-	if _, err := db.ExecContext(ctx, schema); err != nil {
-		return fmt.Errorf("store: apply schema: %w", err)
-	}
-	if version < schemaVersion {
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version=%d", schemaVersion)); err != nil {
-			return fmt.Errorf("store: set schema version: %w", err)
+	if version == 0 {
+		if _, err := db.ExecContext(ctx, schema); err != nil {
+			return fmt.Errorf("store: apply schema: %w", err)
 		}
+		return setSchemaVersion(ctx, db, schemaVersion)
+	}
+	if version == schemaVersion {
+		return nil
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin migration: %w", err)
+	}
+	defer tx.Rollback()
+	for version < schemaVersion {
+		if version-1 >= len(migrations) {
+			return fmt.Errorf("store: no migration path from schema v%d", version)
+		}
+		for _, stmt := range migrations[version-1] {
+			if _, err := tx.ExecContext(ctx, stmt); err != nil {
+				return fmt.Errorf("store: migrate v%d to v%d: %w", version, version+1, err)
+			}
+		}
+		version++
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version=%d", schemaVersion)); err != nil {
+		return fmt.Errorf("store: set schema version: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit migration: %w", err)
+	}
+	return nil
+}
+
+func setSchemaVersion(ctx context.Context, db *sql.DB, version int) error {
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version=%d", version)); err != nil {
+		return fmt.Errorf("store: set schema version: %w", err)
 	}
 	return nil
 }
@@ -183,8 +230,8 @@ func (s *Store) SyncFeed(ctx context.Context, f IngestFeed) (int, error) {
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		res, insErr := tx.ExecContext(ctx,
-			"INSERT INTO feeds (url, title, category, last_fetched, last_error) VALUES (?, ?, ?, ?, '')",
-			f.URL, f.Title, f.Category, now)
+			"INSERT INTO feeds (url, title, category, last_fetched, last_error, etag, last_modified) VALUES (?, ?, ?, ?, '', ?, ?)",
+			f.URL, f.Title, f.Category, now, f.ETag, f.LastModified)
 		if insErr != nil {
 			return 0, fmt.Errorf("store: insert feed: %w", insErr)
 		}
@@ -196,8 +243,8 @@ func (s *Store) SyncFeed(ctx context.Context, f IngestFeed) (int, error) {
 		return 0, fmt.Errorf("store: lookup feed: %w", err)
 	default:
 		if _, err := tx.ExecContext(ctx,
-			"UPDATE feeds SET title = ?, category = ?, last_fetched = ?, last_error = '' WHERE id = ?",
-			f.Title, f.Category, now, id); err != nil {
+			"UPDATE feeds SET title = ?, category = ?, last_fetched = ?, last_error = '', etag = ?, last_modified = ? WHERE id = ?",
+			f.Title, f.Category, now, f.ETag, f.LastModified, id); err != nil {
 			return 0, fmt.Errorf("store: update feed: %w", err)
 		}
 	}
@@ -229,13 +276,16 @@ func (s *Store) SyncFeed(ctx context.Context, f IngestFeed) (int, error) {
 }
 
 // RecordFeedError stores the last failure for a feed so it is visible after a
-// restart. It does not create an unread article.
+// restart. It does not create an unread article. The title and category follow
+// the config so a renamed feed is correct even while it keeps failing.
 func (s *Store) RecordFeedError(ctx context.Context, url, title, category, message string) error {
 	now := time.Now().Unix()
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO feeds (url, title, category, last_fetched, last_error)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(url) DO UPDATE SET
+			title = excluded.title,
+			category = excluded.category,
 			last_fetched = excluded.last_fetched,
 			last_error = excluded.last_error`,
 		url, title, category, now, message)
@@ -243,6 +293,58 @@ func (s *Store) RecordFeedError(ctx context.Context, url, title, category, messa
 		return fmt.Errorf("store: record feed error: %w", err)
 	}
 	return nil
+}
+
+// TouchFeed records a healthy poll that returned no new body, such as a 304
+// Not Modified. It adopts a title or category changed in config while keeping
+// the parsed title the feed sent on its last full response.
+func (s *Store) TouchFeed(ctx context.Context, url, configTitle, category string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE feeds SET
+			last_fetched = ?,
+			last_error = '',
+			title = CASE WHEN ? <> '' THEN ? ELSE title END,
+			category = ?
+		WHERE url = ?`,
+		time.Now().Unix(), configTitle, configTitle, category, url)
+	if err != nil {
+		return fmt.Errorf("store: touch feed: %w", err)
+	}
+	return nil
+}
+
+// Feeds returns every cached subscription with its unread and article counts.
+func (s *Store) Feeds(ctx context.Context) ([]Feed, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT f.id, f.url, f.title, f.category, f.last_fetched, f.last_error,
+			f.etag, f.last_modified,
+			COALESCE(SUM(CASE WHEN a.is_read = 0 THEN 1 ELSE 0 END), 0),
+			COUNT(a.id)
+		FROM feeds f LEFT JOIN articles a ON a.feed_id = f.id
+		GROUP BY f.id
+		ORDER BY f.title COLLATE NOCASE, f.url`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list feeds: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Feed
+	for rows.Next() {
+		var f Feed
+		var fetched sql.NullInt64
+		if err := rows.Scan(&f.ID, &f.URL, &f.Title, &f.Category, &fetched, &f.LastError,
+			&f.ETag, &f.LastModified, &f.Unread, &f.Articles); err != nil {
+			return nil, fmt.Errorf("store: scan feed: %w", err)
+		}
+		if fetched.Valid {
+			f.LastFetched = time.Unix(fetched.Int64, 0)
+		}
+		out = append(out, f)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate feeds: %w", err)
+	}
+	return out, nil
 }
 
 // Articles returns cached articles, newest first.

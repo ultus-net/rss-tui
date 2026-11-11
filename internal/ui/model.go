@@ -2,7 +2,10 @@ package ui
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -40,6 +43,7 @@ const (
 	overlayNone overlay = iota
 	overlayHelp
 	overlayErrors
+	overlayFeeds
 )
 
 type feedError struct {
@@ -86,14 +90,14 @@ type Model struct {
 
 	theme theme.Palette
 
-	refreshing       bool
-	spinner          int
-	lastUpdated      time.Time
-	lastRefreshStart time.Time
+	refreshing  bool
+	spinner     int
+	lastUpdated time.Time
 
 	status    string
 	statusSeq int
 
+	feeds      []store.Feed
 	feedErrors []feedError
 	overlay    overlay
 }
@@ -121,10 +125,11 @@ func New(deps Deps) Model {
 }
 
 func (m Model) Init() tea.Cmd {
+	// The tick chain starts when the first refresh completes, so the pause
+	// between polls is measured from one completion to the next.
 	return tea.Batch(
 		m.loadCmd(),
 		func() tea.Msg { return beginRefreshMsg{} },
-		m.nextTick(),
 	)
 }
 
@@ -144,7 +149,6 @@ func (m *Model) startRefresh() tea.Cmd {
 	}
 	m.refreshing = true
 	m.spinner = 0
-	m.lastRefreshStart = time.Now()
 	return tea.Batch(m.refreshCmd(), m.spinnerTick())
 }
 
@@ -327,6 +331,49 @@ func (m *Model) moveCursor(delta int) {
 	m.previewScroll = 0
 }
 
+// nextUnread moves the cursor to the next unread row in direction dir and
+// reports whether one was found.
+func (m *Model) nextUnread(dir int) bool {
+	if dir == 0 || len(m.visible) == 0 {
+		return false
+	}
+	for i := m.cursor + dir; i >= 0 && i < len(m.visible); i += dir {
+		if m.visible[i].Read {
+			continue
+		}
+		m.cursor = i
+		m.clampOffset()
+		m.previewScroll = 0
+		return true
+	}
+	return false
+}
+
+// copySequence builds the OSC 52 sequence that sets the terminal clipboard.
+// Terminals without clipboard support ignore it silently, so the key is
+// harmless everywhere.
+func copySequence(text string) string {
+	return "\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte(text)) + "\a"
+}
+
+func (m *Model) yank(markdown bool) tea.Cmd {
+	a := m.selected()
+	if a == nil || strings.TrimSpace(a.Link) == "" {
+		return m.flash("no link to copy")
+	}
+	text, label := a.Link, "link copied"
+	if markdown {
+		title := strings.NewReplacer("[", `\[`, "]", `\]`).Replace(a.Title)
+		text, label = "["+title+"]("+a.Link+")", "markdown link copied"
+	}
+	return func() tea.Msg {
+		if _, err := io.WriteString(os.Stdout, copySequence(text)); err != nil {
+			return yankDoneMsg{err: err}
+		}
+		return yankDoneMsg{label: label}
+	}
+}
+
 func (m *Model) ensurePreview() {
 	a := m.selected()
 	if a == nil {
@@ -450,6 +497,21 @@ func (m Model) loadCmd() tea.Cmd {
 		if err != nil {
 			return msg
 		}
+		if feeds, feedErr := st.Feeds(ctx); feedErr == nil {
+			msg.feeds = feeds
+			for _, f := range feeds {
+				if f.LastError == "" {
+					continue
+				}
+				msg.feedErrors = append(msg.feedErrors, feedError{
+					Feed: f.Title,
+					Err:  f.LastError,
+					At:   f.LastFetched,
+				})
+			}
+		} else {
+			msg.feedErrors = append(msg.feedErrors, feedError{Feed: "cache", Err: feedErr.Error(), At: time.Now()})
+		}
 		if v, ok, metaErr := st.Meta(ctx, "last_updated"); metaErr == nil && ok {
 			if ts, perr := strconv.ParseInt(v, 10, 64); perr == nil {
 				msg.lastUpdated = time.Unix(ts, 0)
@@ -467,15 +529,27 @@ func (m Model) refreshCmd() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
-		results := deps.Fetcher.FetchAll(ctx, deps.Cfg.Feeds)
 		at := time.Now()
 		msg := refreshDoneMsg{at: at}
+
+		cached, err := deps.Store.Feeds(ctx)
+		if err != nil {
+			msg.errors = append(msg.errors, feedError{Feed: "cache", Err: err.Error(), At: at})
+		}
+		results := deps.Fetcher.FetchAll(ctx, deps.Cfg.Feeds, validatorsFrom(cached))
+
 		newFeeds := make([]string, 0, len(results))
 		newTitles := make([]string, 0, len(results))
 		for _, r := range results {
 			if r.Err != nil {
 				msg.errors = append(msg.errors, feedError{Feed: r.Title, Err: r.Err.Error(), At: at})
 				_ = deps.Store.RecordFeedError(ctx, r.Feed.URL, r.Title, r.Feed.Category, r.Err.Error())
+				continue
+			}
+			if r.NotModified {
+				if err := deps.Store.TouchFeed(ctx, r.Feed.URL, r.Feed.Title, r.Feed.Category); err != nil {
+					msg.errors = append(msg.errors, feedError{Feed: r.Title, Err: err.Error(), At: at})
+				}
 				continue
 			}
 			added, err := deps.Store.SyncFeed(ctx, toIngest(r))
@@ -507,8 +581,25 @@ func (m Model) refreshCmd() tea.Cmd {
 	}
 }
 
+func validatorsFrom(feeds []store.Feed) map[string]feed.Validators {
+	out := make(map[string]feed.Validators, len(feeds))
+	for _, f := range feeds {
+		if f.ETag == "" && f.LastModified == "" {
+			continue
+		}
+		out[f.URL] = feed.Validators{ETag: f.ETag, LastModified: f.LastModified}
+	}
+	return out
+}
+
 func toIngest(r feed.Result) store.IngestFeed {
-	out := store.IngestFeed{URL: r.Feed.URL, Title: r.Title, Category: r.Feed.Category}
+	out := store.IngestFeed{
+		URL:          r.Feed.URL,
+		Title:        r.Title,
+		Category:     r.Feed.Category,
+		ETag:         r.Validators.ETag,
+		LastModified: r.Validators.LastModified,
+	}
 	out.Articles = make([]store.IngestArticle, 0, len(r.Items))
 	for _, it := range r.Items {
 		out.Articles = append(out.Articles, store.IngestArticle{

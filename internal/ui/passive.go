@@ -66,7 +66,11 @@ func RunPassive(ctx context.Context, deps Deps, opts PassiveOptions) error {
 	once := opts.Once || !tty
 
 	for {
-		results := deps.Fetcher.FetchAll(ctx, deps.Cfg.Feeds)
+		cached, err := deps.Store.Feeds(ctx)
+		if err != nil {
+			return fmt.Errorf("passive: load feeds: %w", err)
+		}
+		results := deps.Fetcher.FetchAll(ctx, deps.Cfg.Feeds, validatorsFrom(cached))
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -80,6 +84,10 @@ func RunPassive(ctx context.Context, deps Deps, opts PassiveOptions) error {
 			if r.Err != nil {
 				failures = append(failures, feedError{Feed: r.Title, Err: r.Err.Error(), At: now})
 				_ = deps.Store.RecordFeedError(ctx, r.Feed.URL, r.Title, r.Feed.Category, r.Err.Error())
+				continue
+			}
+			if r.NotModified {
+				_ = deps.Store.TouchFeed(ctx, r.Feed.URL, r.Feed.Title, r.Feed.Category)
 				continue
 			}
 			added, err := deps.Store.SyncFeed(ctx, toIngest(r))
@@ -98,7 +106,10 @@ func RunPassive(ctx context.Context, deps Deps, opts PassiveOptions) error {
 		_ = deps.Store.Prune(ctx, deps.Cfg.MaxArticlesPerFeed)
 		_ = deps.Store.SetMeta(ctx, "last_updated", strconv.FormatInt(now.Unix(), 10))
 
-		articles, err := deps.Store.Articles(ctx, store.ListOptions{Limit: deps.Cfg.PassiveItems})
+		articles, err := deps.Store.Articles(ctx, store.ListOptions{
+			UnreadOnly: deps.Cfg.PassiveUnreadOnly,
+			Limit:      deps.Cfg.PassiveItems,
+		})
 		if err != nil {
 			return fmt.Errorf("passive: load articles: %w", err)
 		}
@@ -254,7 +265,50 @@ func buildPassiveLines(v passiveView) []string {
 		titleW = 8
 	}
 
-	for _, a := range v.Articles {
+	maxLines := 0
+	if v.Height > 0 {
+		maxLines = v.Height - 1
+		if maxLines < 3 {
+			maxLines = 3
+		}
+	}
+
+	// Failure rows are the reason someone looks at the pane, so they are
+	// reserved before article rows take the remaining height.
+	var failLines []string
+	if len(v.Failures) > 0 {
+		failLines = append(failLines, "")
+		shown := v.Failures
+		if len(shown) > 2 {
+			shown = shown[:2]
+		}
+		for _, fe := range shown {
+			failLines = append(failLines, truncateStyled(failure("⚠ "+fe.Feed+": "+fe.Err), limit))
+		}
+		if len(v.Failures) > 2 {
+			failLines = append(failLines, failure(fmt.Sprintf("… %d more failed", len(v.Failures)-2)))
+		}
+		if maxLines > 0 && len(failLines) > maxLines-3 {
+			keep := maxLines - 3
+			if keep < 1 {
+				keep = 1
+			}
+			failLines = failLines[:keep]
+		}
+	}
+
+	articleRows := len(v.Articles)
+	if maxLines > 0 {
+		articleRows = maxLines - len(lines) - len(failLines)
+		if articleRows < 0 {
+			articleRows = 0
+		}
+		if articleRows > len(v.Articles) {
+			articleRows = len(v.Articles)
+		}
+	}
+	for i := 0; i < articleRows; i++ {
+		a := v.Articles[i]
 		stamp := a.Published
 		if stamp.IsZero() {
 			stamp = a.FirstSeen
@@ -272,31 +326,10 @@ func buildPassiveLines(v passiveView) []string {
 			titleStyle(textutil.Truncate(a.Title, titleW))
 		lines = append(lines, truncateStyled(line, limit))
 	}
-	if len(v.Articles) == 0 {
+	if len(v.Articles) == 0 && articleRows > 0 {
 		lines = append(lines, faint("no articles yet · waiting for the next refresh"))
 	}
-
-	if len(v.Failures) > 0 {
-		lines = append(lines, "")
-		for i, fe := range v.Failures {
-			if i >= 2 {
-				lines = append(lines, failure(fmt.Sprintf("… %d more failed", len(v.Failures)-2)))
-				break
-			}
-			msg := fe.Feed + ": " + fe.Err
-			lines = append(lines, truncateStyled(failure("⚠ "+msg), limit))
-		}
-	}
-
-	if v.Height > 0 {
-		maxLines := v.Height - 1
-		if maxLines < 3 {
-			maxLines = 3
-		}
-		if len(lines) > maxLines {
-			lines = lines[:maxLines]
-		}
-	}
+	lines = append(lines, failLines...)
 	return lines
 }
 

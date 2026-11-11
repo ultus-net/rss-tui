@@ -43,13 +43,22 @@ type Item struct {
 	Published time.Time
 }
 
+// Validators are the HTTP cache validators a feed sent last time. Sending them
+// back lets the server answer 304 and skip the body, parse and conversion.
+type Validators struct {
+	ETag         string
+	LastModified string
+}
+
 // Result is the outcome of fetching one feed.
 type Result struct {
-	Feed    config.Feed
-	Title   string
-	Items   []Item
-	Err     error
-	Elapsed time.Duration
+	Feed        config.Feed
+	Title       string
+	Items       []Item
+	Err         error
+	Elapsed     time.Duration
+	Validators  Validators
+	NotModified bool
 }
 
 // Options configures a Fetcher.
@@ -96,8 +105,9 @@ func New(opts Options) *Fetcher {
 }
 
 // FetchAll fetches feeds concurrently and returns one result per feed in input
-// order. A slow or failing feed never blocks the others.
-func (f *Fetcher) FetchAll(ctx context.Context, feeds []config.Feed) []Result {
+// order. A slow or failing feed never blocks the others. Pass the validators
+// from the previous poll per feed URL; a 304 short-circuits the body read.
+func (f *Fetcher) FetchAll(ctx context.Context, feeds []config.Feed, validators map[string]Validators) []Result {
 	results := make([]Result, len(feeds))
 	sem := make(chan struct{}, f.workers)
 	var wg sync.WaitGroup
@@ -107,16 +117,16 @@ func (f *Fetcher) FetchAll(ctx context.Context, feeds []config.Feed) []Result {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			results[i] = f.fetchOne(ctx, feeds[i])
+			results[i] = f.fetchOne(ctx, feeds[i], validators[feeds[i].URL])
 		}(i)
 	}
 	wg.Wait()
 	return results
 }
 
-func (f *Fetcher) fetchOne(parent context.Context, feed config.Feed) Result {
+func (f *Fetcher) fetchOne(parent context.Context, feed config.Feed, cached Validators) Result {
 	started := time.Now()
-	res := Result{Feed: feed, Title: feed.DisplayName()}
+	res := Result{Feed: feed, Title: feed.DisplayName(), Validators: cached}
 	ctx, cancel := context.WithTimeout(parent, f.timeout)
 	defer cancel()
 
@@ -128,6 +138,12 @@ func (f *Fetcher) fetchOne(parent context.Context, feed config.Feed) Result {
 	}
 	req.Header.Set("User-Agent", f.userAgent)
 	req.Header.Set("Accept", "application/atom+xml, application/rss+xml, application/xml;q=0.9, text/xml;q=0.9, */*;q=0.8")
+	if cached.ETag != "" {
+		req.Header.Set("If-None-Match", cached.ETag)
+	}
+	if cached.LastModified != "" {
+		req.Header.Set("If-Modified-Since", cached.LastModified)
+	}
 
 	resp, err := f.client.Do(req)
 	if err != nil {
@@ -136,6 +152,11 @@ func (f *Fetcher) fetchOne(parent context.Context, feed config.Feed) Result {
 		return res
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotModified {
+		res.NotModified = true
+		res.Elapsed = time.Since(started)
+		return res
+	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		res.Err = fmt.Errorf("HTTP %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
 		res.Elapsed = time.Since(started)
@@ -172,6 +193,10 @@ func (f *Fetcher) fetchOne(parent context.Context, feed config.Feed) Result {
 		}
 		seen[item.GUID] = true
 		res.Items = append(res.Items, item)
+	}
+	res.Validators = Validators{
+		ETag:         strings.TrimSpace(resp.Header.Get("ETag")),
+		LastModified: strings.TrimSpace(resp.Header.Get("Last-Modified")),
 	}
 	res.Elapsed = time.Since(started)
 	return res

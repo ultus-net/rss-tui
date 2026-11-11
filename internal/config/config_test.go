@@ -160,4 +160,78 @@ func TestSampleParses(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("sample invalid: %v", err)
 	}
+	if cfg.PassiveUnreadOnly {
+		t.Fatal("sample must ship passive_unread_only off")
+	}
+}
+
+func TestAddFeedsNormalisesAndDeduplicates(t *testing.T) {
+	cfg := Config{Feeds: []Feed{{URL: "https://a.example/rss", Title: "A", Category: "tech"}}}
+	added := cfg.AddFeeds([]Feed{
+		{URL: "  https://a.example/rss ", Title: "Duplicate"},
+		{URL: "https://b.example/rss", Title: "  B  ", Category: "  News "},
+		{URL: "https://c.example/rss"},
+		{URL: "  "},
+	})
+	if added != 2 {
+		t.Fatalf("added = %d, want 2", added)
+	}
+	if len(cfg.Feeds) != 3 {
+		t.Fatalf("feeds = %d, want 3", len(cfg.Feeds))
+	}
+	if cfg.Feeds[1].Title != "B" || cfg.Feeds[1].Category != "news" {
+		t.Fatalf("normalised feed = %+v", cfg.Feeds[1])
+	}
+	if cfg.Feeds[2].Category != "general" {
+		t.Fatalf("default category = %q", cfg.Feeds[2].Category)
+	}
+	if got := cfg.AddFeeds(nil); got != 0 {
+		t.Fatalf("empty merge added %d", got)
+	}
+}
+
+func TestSaveWritesBackupAndReloads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	cfg, created, err := Load(path)
+	if err != nil || !created {
+		t.Fatalf("Load: created=%v err=%v", created, err)
+	}
+	cfg.PassiveUnreadOnly = true
+	cfg.Feeds = append(cfg.Feeds, Feed{URL: "https://new.example/rss", Title: "New", Category: "tech"})
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	backup, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatalf("backup missing: %v", err)
+	}
+	if !strings.Contains(string(backup), "passive_unread_only: false") {
+		t.Fatalf("backup is not the previous file:\n%s", backup)
+	}
+	reloaded, _, err := Load(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if !reloaded.PassiveUnreadOnly {
+		t.Fatal("passive_unread_only did not survive the round trip")
+	}
+	if len(reloaded.Feeds) != len(cfg.Feeds) {
+		t.Fatalf("feeds = %d, want %d", len(reloaded.Feeds), len(cfg.Feeds))
+	}
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("temp file left behind: %v", err)
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read saved: %v", err)
+	}
+	if strings.Contains(string(saved), "10m0s") {
+		t.Fatalf("duration saved in Go's long form:\n%s", saved)
+	}
+	if !strings.Contains(string(saved), "\n  - url: ") {
+		t.Fatalf("feeds are not indented by two spaces:\n%s", saved)
+	}
+	if err := Save("", cfg); err == nil {
+		t.Fatal("Save accepted an empty path")
+	}
 }

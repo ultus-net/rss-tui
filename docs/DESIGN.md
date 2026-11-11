@@ -30,9 +30,10 @@ evaluate), and keeping the split at every width (unreadable below ~90 cols).
 ```text
 cmd/rss-tui
     |
-    +-- internal/config       YAML, defaults, validation, XDG paths
+    +-- internal/config       YAML, defaults, validation, XDG paths, save/merge
     +-- internal/store        SQLite schema and queries
     +-- internal/feed         HTTP worker pool, gofeed, HTML -> markdown
+    +-- internal/opml         subscription import and export
     +-- internal/notify       notify-send / osascript
     +-- internal/theme        palettes
     +-- internal/ui           Bubble Tea model, passive ticker
@@ -53,16 +54,23 @@ tick / r / startup
   refreshing = true, spinner on
         |
         v
-  FetchAll(feeds)  -- worker pool, per-feed context timeout
+  Feeds() -> cached ETag / Last-Modified per URL
         |
-        +--> feed ok   -> SyncFeed (tx: upsert feed, insert unseen) -> new count
+        v
+  FetchAll(feeds, validators)  -- worker pool, per-feed context timeout
+        |
+        +--> 304       -> TouchFeed (clear error, adopt config title)
+        +--> feed ok   -> SyncFeed (tx: upsert feed + validators, insert unseen)
         +--> feed fail -> RecordFeedError (no article row)
         |
         v
   Prune(max_articles_per_feed), SetMeta(last_updated)
         |
         v
-  refreshDoneMsg -> load articles -> recompute filters -> render
+  refreshDoneMsg -> load articles + feed health -> recompute -> render
+        |
+        v
+  nextTick (scheduled from completion, not from this poll's start)
 ```
 
 The fetch command runs off the UI goroutine. It writes to SQLite and returns a
@@ -75,10 +83,20 @@ A slow feed is bounded twice: `http.Client.Timeout` and the per-feed
 becomes `timed out after 20s` in the status bar and the error overlay, not a
 stalled UI.
 
+Conditional requests are a pure fast path. The stored `ETag` and `Last-Modified`
+are replayed; a `304` skips the body read, parse, markdown conversion and
+article upserts, and only refreshes the feed's health row. A feed that ignores
+validators is unaffected, because a `200` still replaces both stored values.
+
+The next timer is armed when a poll finishes, so the interval is an idle gap
+rather than a start-to-start schedule. A poll that outlives its interval cannot
+trigger a second poll immediately after it returns.
+
 ## Schema
 
 ```sql
-feeds(id, url UNIQUE, title, category, last_fetched, last_error)
+feeds(id, url UNIQUE, title, category, last_fetched, last_error,
+      etag, last_modified)
 articles(id, feed_id, guid, title, link, author, summary, content,
          published, first_seen, is_read,
          UNIQUE(feed_id, guid))
@@ -89,10 +107,16 @@ meta(key PRIMARY KEY, value)
   and preserves `is_read`.
 - Pruning uses `ROW_NUMBER() OVER (PARTITION BY feed_id ORDER BY published)` and
   keeps the newest `max_articles_per_feed`.
-- `theme` and `last_updated` live in `meta`. The config file stays user-authored
-  YAML; the app never rewrites it.
+- `theme` and `last_updated` live in `meta`. Config stays user-authored YAML; the
+  app only rewrites it for an explicit `import-opml`, and keeps a `.bak`.
 - `PRAGMA user_version` guards against opening a newer schema with an older
-  build.
+  build. Version 1 to 2 adds the two validator columns with `ALTER TABLE` in one
+  transaction; a fresh database is created at the current version and skips the
+  migration list. The upgrade path is tested against a seeded v1 database, not
+  only a fresh file.
+- Feed health is read from the same rows the poll writes: `Feeds()` joins the
+  article counts, so the `F` overlay and `e` errors show persisted state rather
+  than this process's memory.
 
 ## Interactive state
 
@@ -142,8 +166,10 @@ behind. Line width is capped at `terminalWidth - 1`; writing the last cell would
 trigger a wrap and desynchronise the cursor arithmetic.
 
 The block is capped at `height - 1` lines so a tall block cannot scroll the
-terminal out from under the cursor. When a redraw shrinks the block, the extra
-rows are cleared in the same pass, so no stale headline can survive below it.
+terminal out from under the cursor. Failure rows are reserved before article
+rows are laid out, so a short pane still says which feeds failed instead of
+silently trimming that section. When a redraw shrinks the block, the extra rows
+are cleared in the same pass, so no stale headline can survive below it.
 `Finish` only moves to a clean line on exit; it never erases the final block.
 Each cycle renders before it waits, so a cancellation during the wait drops no
 rendered update. A cancellation during a fetch abandons that in-flight fetch
@@ -161,17 +187,25 @@ once.
 | Browser launch | `tea.ExecProcess` releases the terminal; failure shown in status |
 | Notification | Best effort, 5s timeout, missing binary ignored |
 | Theme persist | Best effort; failure shown, theme still applied for the session |
+| OPML import | Validate the merged config before writing; back up to `config.yaml.bak`, then write a temp file and rename. A failure leaves the live config untouched. |
 
 ## Testing
 
-- Config: sample generation, duration parsing, defaults, dedupe, validation.
+- Config: sample generation, duration parsing, defaults, dedupe, validation,
+  merge-by-URL, backup and atomic save.
 - Store: idempotent upsert, read-state preservation, unread/category filters,
-  pruning, cascade on feed removal, meta upsert.
+  pruning, cascade on feed removal, meta upsert, feed health counters, error
+  adoption of renamed feeds, and a v1-to-v2 migration against a seeded database.
 - Feed: RSS and Atom parsing, relative link resolution, script stripping,
-  HTML-to-markdown, timeout and HTTP errors, input-order preservation.
+  HTML-to-markdown, timeout and HTTP errors, input-order preservation,
+  conditional requests (`If-None-Match`, `If-Modified-Since`, 304, validator
+  replacement when a feed changes).
+- OPML: category grouping on export, nested and flat import, duplicate and
+  lowercase-attribute handling, invalid XML.
 - Text: escape stripping, wide-character truncation, wrapping, markdown
   flattening, relative timestamps.
 - UI: filter combinations, pane layout at 90/120/160 columns, exact view height
-  and width, row truncation, status contents, passive block width and height
-  caps, redraw cursor arithmetic.
+  and width, row truncation, status contents, next-unread traversal, OSC 52
+  payload, feed-health overlay, persisted-error seeding, passive block width and
+  height caps with reserved failure rows, redraw cursor arithmetic.
 - Theme: every palette fills every role with a valid hex colour.

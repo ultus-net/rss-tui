@@ -50,7 +50,17 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-func (d Duration) MarshalYAML() (any, error) { return time.Duration(d).String(), nil }
+func (d Duration) MarshalYAML() (any, error) {
+	dur := time.Duration(d)
+	switch {
+	case dur%time.Hour == 0:
+		return fmt.Sprintf("%dh", int(dur.Hours())), nil
+	case dur%time.Minute == 0:
+		return fmt.Sprintf("%dm", int(dur.Minutes())), nil
+	default:
+		return dur.String(), nil
+	}
+}
 
 // Feed is one subscription.
 type Feed struct {
@@ -77,6 +87,7 @@ type Config struct {
 	ConcurrentFetches  int      `yaml:"concurrent_fetches"`
 	MaxArticlesPerFeed int      `yaml:"max_articles_per_feed"`
 	PassiveItems       int      `yaml:"passive_items"`
+	PassiveUnreadOnly  bool     `yaml:"passive_unread_only"`
 	Theme              string   `yaml:"theme"`
 	Browser            string   `yaml:"browser"`
 	Notifications      bool     `yaml:"notifications"`
@@ -104,6 +115,71 @@ func (c *Config) URLs() []string {
 		out = append(out, f.URL)
 	}
 	return out
+}
+
+// AddFeeds merges subscriptions into the config using the same normalisation
+// Load applies. A URL that is already configured is skipped. It reports how
+// many feeds were added.
+func (c *Config) AddFeeds(extra []Feed) int {
+	seen := make(map[string]bool, len(c.Feeds))
+	for _, f := range c.Feeds {
+		seen[f.URL] = true
+	}
+	added := 0
+	for _, f := range extra {
+		f.URL = strings.TrimSpace(f.URL)
+		f.Title = strings.TrimSpace(f.Title)
+		f.Category = strings.ToLower(strings.TrimSpace(f.Category))
+		if f.Category == "" {
+			f.Category = defaultCategory
+		}
+		if f.URL == "" || seen[f.URL] {
+			continue
+		}
+		seen[f.URL] = true
+		c.Feeds = append(c.Feeds, f)
+		added++
+	}
+	return added
+}
+
+// Save writes cfg to path and keeps the previous file at path.bak. The write is
+// atomic so an interrupted save cannot truncate the live config.
+func Save(path string, cfg *Config) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("config: empty path")
+	}
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(cfg); err != nil {
+		return fmt.Errorf("encode config: %w", err)
+	}
+	if err := enc.Close(); err != nil {
+		return fmt.Errorf("encode config: %w", err)
+	}
+	data := buf.Bytes()
+	existing, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		if err := os.WriteFile(path+".bak", existing, 0o600); err != nil {
+			return fmt.Errorf("back up config: %w", err)
+		}
+	case !errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("read config for backup: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("replace config: %w", err)
+	}
+	return nil
 }
 
 // DefaultPath is $XDG_CONFIG_HOME/rss-tui/config.yaml.
@@ -259,6 +335,9 @@ max_articles_per_feed: 100
 
 # Headlines shown by --passive.
 passive_items: 20
+
+# Show only unread headlines in --passive. Off by default.
+passive_unread_only: false
 
 # catppuccin-mocha | dracula | nord | gruvbox-dark | tokyo-night | solarized-dark
 # Press "t" in the TUI to cycle themes; the choice is remembered across restarts.

@@ -67,7 +67,7 @@ func TestFetchRSSAndConvertHTML(t *testing.T) {
 
 	results := newFetcher(2*time.Second).FetchAll(context.Background(), []config.Feed{{
 		URL: srv.URL + "/rss", Title: "Custom", Category: "tech",
-	}})
+	}}, nil)
 	if len(results) != 1 {
 		t.Fatalf("results = %d", len(results))
 	}
@@ -112,7 +112,7 @@ func TestFetchAtomUsesUpdated(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	r := newFetcher(2*time.Second).FetchAll(context.Background(), []config.Feed{{URL: srv.URL}})[0]
+	r := newFetcher(2*time.Second).FetchAll(context.Background(), []config.Feed{{URL: srv.URL}}, nil)[0]
 	if r.Err != nil {
 		t.Fatalf("fetch: %v", r.Err)
 	}
@@ -140,7 +140,7 @@ func TestFetchTimeoutIsReported(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	r := newFetcher(60*time.Millisecond).FetchAll(context.Background(), []config.Feed{{URL: srv.URL}})[0]
+	r := newFetcher(60*time.Millisecond).FetchAll(context.Background(), []config.Feed{{URL: srv.URL}}, nil)[0]
 	if r.Err == nil {
 		t.Fatal("expected a timeout error")
 	}
@@ -155,7 +155,7 @@ func TestFetchHTTPError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	r := newFetcher(time.Second).FetchAll(context.Background(), []config.Feed{{URL: srv.URL}})[0]
+	r := newFetcher(time.Second).FetchAll(context.Background(), []config.Feed{{URL: srv.URL}}, nil)[0]
 	if r.Err == nil || !strings.Contains(r.Err.Error(), "HTTP 500") {
 		t.Fatalf("error = %v", r.Err)
 	}
@@ -169,7 +169,7 @@ func TestFetchAllKeepsInputOrder(t *testing.T) {
 	defer srv.Close()
 
 	feeds := []config.Feed{{URL: srv.URL + "/a"}, {URL: srv.URL + "/b"}, {URL: srv.URL + "/c"}}
-	results := newFetcher(2*time.Second).FetchAll(context.Background(), feeds)
+	results := newFetcher(2*time.Second).FetchAll(context.Background(), feeds, nil)
 	for i, r := range results {
 		if r.Err != nil {
 			t.Fatalf("feed %d: %v", i, r.Err)
@@ -200,5 +200,84 @@ func TestToMarkdownFallback(t *testing.T) {
 	}
 	if got := toMarkdown("   "); got != "" {
 		t.Fatalf("empty markdown = %q", got)
+	}
+}
+
+func TestFetchConditionalNotModified(t *testing.T) {
+	const (
+		etag    = `"v1"`
+		lastMod = "Mon, 02 Jan 2023 15:04:05 GMT"
+	)
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Header.Get("If-None-Match") == etag || r.Header.Get("If-Modified-Since") == lastMod {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", etag)
+		w.Header().Set("Last-Modified", lastMod)
+		fmt.Fprint(w, rssBody)
+	}))
+	defer srv.Close()
+
+	feeds := []config.Feed{{URL: srv.URL}}
+	first := newFetcher(time.Second).FetchAll(context.Background(), feeds, nil)[0]
+	if first.Err != nil {
+		t.Fatalf("first fetch: %v", first.Err)
+	}
+	if first.NotModified {
+		t.Fatal("first fetch reported a 304")
+	}
+	if first.Validators.ETag != etag || first.Validators.LastModified == "" {
+		t.Fatalf("validators not captured: %+v", first.Validators)
+	}
+	if len(first.Items) != 2 {
+		t.Fatalf("first items = %d", len(first.Items))
+	}
+
+	second := newFetcher(time.Second).FetchAll(context.Background(), feeds, map[string]Validators{
+		srv.URL: first.Validators,
+	})[0]
+	if second.Err != nil {
+		t.Fatalf("second fetch: %v", second.Err)
+	}
+	if !second.NotModified {
+		t.Fatal("second fetch did not report a 304")
+	}
+	if len(second.Items) != 0 {
+		t.Fatalf("304 returned %d items", len(second.Items))
+	}
+
+	lastModified := newFetcher(time.Second).FetchAll(context.Background(), feeds, map[string]Validators{
+		srv.URL: {LastModified: first.Validators.LastModified},
+	})[0]
+	if !lastModified.NotModified {
+		t.Fatalf("Last-Modified was not revalidated: %+v", lastModified.Validators)
+	}
+	if requests != 3 {
+		t.Fatalf("requests = %d, want 3", requests)
+	}
+}
+
+func TestFetchReplacesStaleValidators(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") == `"old"` {
+			w.Header().Set("ETag", `"new"`)
+			fmt.Fprint(w, rssBody)
+			return
+		}
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer srv.Close()
+
+	r := newFetcher(time.Second).FetchAll(context.Background(),
+		[]config.Feed{{URL: srv.URL}},
+		map[string]Validators{srv.URL: {ETag: `"old"`}})[0]
+	if r.Err != nil || r.NotModified {
+		t.Fatalf("expected a fresh body, got err=%v notModified=%v", r.Err, r.NotModified)
+	}
+	if r.Validators.ETag != `"new"` {
+		t.Fatalf("etag = %q", r.Validators.ETag)
 	}
 }

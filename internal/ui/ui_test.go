@@ -2,6 +2,12 @@ package ui
 
 import (
 	"bytes"
+	"context"
+	"encoding/base64"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +15,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/ultus-net/rss-tui/internal/config"
+	"github.com/ultus-net/rss-tui/internal/feed"
 	"github.com/ultus-net/rss-tui/internal/store"
 	"github.com/ultus-net/rss-tui/internal/theme"
 )
@@ -237,5 +244,210 @@ func TestBlockRendererRedrawsInPlace(t *testing.T) {
 	}
 	if !strings.Contains(out, "\x1b[1A") {
 		t.Fatalf("missing final cursor adjustment: %q", out)
+	}
+}
+
+func TestNextUnread(t *testing.T) {
+	m := testModel(120, 30)
+	m.cursor = 0
+	if !m.nextUnread(1) || m.cursor != 2 {
+		t.Fatalf("forward from 0: cursor = %d", m.cursor)
+	}
+	if m.nextUnread(1) {
+		t.Fatal("found an unread past the last row")
+	}
+	if !m.nextUnread(-1) || m.cursor != 0 {
+		t.Fatalf("backward: cursor = %d", m.cursor)
+	}
+	if m.nextUnread(-1) {
+		t.Fatal("found an unread above the first row")
+	}
+
+	m.cursor = 1
+	m.visible[1].Read = true
+	if !m.nextUnread(1) || m.cursor != 2 {
+		t.Fatalf("skipped a read row incorrectly: %d", m.cursor)
+	}
+	if !m.nextUnread(-1) || m.cursor != 0 {
+		t.Fatalf("backward skipped an unread row: %d", m.cursor)
+	}
+}
+
+func TestCopySequenceEncodesClipboardPayload(t *testing.T) {
+	seq := copySequence("https://example.com/go")
+	if !strings.HasPrefix(seq, "\x1b]52;c;") || !strings.HasSuffix(seq, "\a") {
+		t.Fatalf("sequence shape = %q", seq)
+	}
+	payload := strings.TrimSuffix(strings.TrimPrefix(seq, "\x1b]52;c;"), "\a")
+	decoded, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		t.Fatalf("payload is not base64: %v", err)
+	}
+	if string(decoded) != "https://example.com/go" {
+		t.Fatalf("decoded = %q", decoded)
+	}
+}
+
+func TestYankWithoutLinkFlashes(t *testing.T) {
+	m := testModel(120, 30)
+	m.articles[0].Link = ""
+	m.visible[0].Link = ""
+	m.cursor = 0
+	m.yank(false)
+	if m.status != "no link to copy" {
+		t.Fatalf("status = %q", m.status)
+	}
+}
+
+func TestFeedHealthOverlay(t *testing.T) {
+	m := testModel(120, 30)
+	m.feeds = []store.Feed{
+		{URL: "https://a.example/rss", Title: "Alpha", Category: "tech", LastFetched: time.Now().Add(-3 * time.Hour), Unread: 3, Articles: 10},
+		{URL: "https://b.example/rss", Title: "Broken", Category: "news", LastError: "HTTP 500 nope"},
+	}
+	m.overlay = overlayFeeds
+	view := m.View()
+	for _, want := range []string{"feed health", "Alpha", "3 unread", "10 cached", "fetched 3h ago", "HTTP 500 nope"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("overlay missing %q:\n%s", want, view)
+		}
+	}
+	lines := strings.Split(view, "\n")
+	if len(lines) != m.height {
+		t.Fatalf("overlay lines = %d, want %d", len(lines), m.height)
+	}
+	for i, line := range lines {
+		if w := ansi.StringWidth(line); w > m.width {
+			t.Fatalf("overlay line %d width %d > %d", i, w, m.width)
+		}
+	}
+}
+
+func TestLoadedMsgSeedsPersistedErrorsOnce(t *testing.T) {
+	m := testModel(120, 30)
+	m.ready = false
+	persisted := feedError{Feed: "Broken", Err: "HTTP 500", At: time.Now()}
+
+	model, _ := m.Update(loadedMsg{articles: m.articles, feedErrors: []feedError{persisted}})
+	m = model.(Model)
+	if len(m.feedErrors) != 1 || m.feedErrors[0].Err != "HTTP 500" {
+		t.Fatalf("persisted error not seeded: %+v", m.feedErrors)
+	}
+
+	model, _ = m.Update(loadedMsg{articles: m.articles})
+	m = model.(Model)
+	if len(m.feedErrors) != 1 {
+		t.Fatalf("a later load wiped live errors: %+v", m.feedErrors)
+	}
+}
+
+func TestRefreshCmdRevalidatesAndClearsErrors(t *testing.T) {
+	const etag = `"v1"`
+	const body = `<?xml version="1.0"?><rss version="2.0"><channel><title>Local</title>
+	  <item><title>One</title><guid>one</guid><description>first</description></item>
+	  <item><title>Two</title><guid>two</guid><description>second</description></item>
+	</channel></rss>`
+	conditional := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") == etag {
+			conditional++
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", etag)
+		fmt.Fprint(w, body)
+	}))
+	defer srv.Close()
+
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	defer st.Close()
+
+	cfg := &config.Config{
+		RefreshInterval: config.Duration(10 * time.Minute),
+		Feeds:           []config.Feed{{URL: srv.URL, Title: "Local", Category: "tech"}},
+	}
+	m := New(Deps{
+		Cfg:     cfg,
+		Store:   st,
+		Fetcher: feed.New(feed.Options{Timeout: 2 * time.Second, Workers: 1}),
+		Theme:   theme.Get("nord"),
+	})
+
+	first := m.refreshCmd()().(refreshDoneMsg)
+	if first.newCount != 2 || len(first.errors) != 0 {
+		t.Fatalf("first refresh = %+v", first)
+	}
+
+	if err := st.RecordFeedError(ctx, srv.URL, "Local", "tech", "stale error"); err != nil {
+		t.Fatalf("record error: %v", err)
+	}
+	loaded := m.loadCmd()().(loadedMsg)
+	if len(loaded.feeds) != 1 || loaded.feeds[0].ETag != etag {
+		t.Fatalf("validators not persisted: %+v", loaded.feeds)
+	}
+	if len(loaded.feedErrors) != 1 || !strings.Contains(loaded.feedErrors[0].Err, "stale error") {
+		t.Fatalf("persisted error missing from loadCmd: %+v", loaded.feedErrors)
+	}
+
+	second := m.refreshCmd()().(refreshDoneMsg)
+	if second.newCount != 0 || len(second.errors) != 0 {
+		t.Fatalf("second refresh = %+v", second)
+	}
+	if conditional != 1 {
+		t.Fatalf("conditional requests = %d, want 1", conditional)
+	}
+	feeds, err := st.Feeds(ctx)
+	if err != nil {
+		t.Fatalf("feeds: %v", err)
+	}
+	if feeds[0].LastError != "" {
+		t.Fatalf("304 did not clear the stored error: %q", feeds[0].LastError)
+	}
+	if feeds[0].Articles != 2 {
+		t.Fatalf("304 changed the cache: %d articles", feeds[0].Articles)
+	}
+}
+
+func TestPassiveReservesRowsForFailures(t *testing.T) {
+	now := time.Now()
+	articles := make([]store.Article, 0, 20)
+	for i := 0; i < 20; i++ {
+		articles = append(articles, store.Article{
+			Title: fmt.Sprintf("Headline %d", i), FeedTitle: "Example", Published: now,
+		})
+	}
+	v := passiveView{
+		Now: now, Updated: now, Unread: 20, FeedCount: 4,
+		Failures: []feedError{
+			{Feed: "Alpha", Err: "timed out after 20s"},
+			{Feed: "Beta", Err: "HTTP 500"},
+			{Feed: "Gamma", Err: "parse feed"},
+		},
+		Articles: articles,
+		Refresh:  10 * time.Minute,
+		Width:    100,
+		Height:   8,
+		Palette:  theme.Get("nord"),
+	}
+	lines := buildPassiveLines(v)
+	if len(lines) > v.Height-1 {
+		t.Fatalf("lines = %d, height cap %d", len(lines), v.Height-1)
+	}
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "Alpha: timed out") {
+		t.Fatalf("failure rows were trimmed away:\n%s", joined)
+	}
+	if !strings.Contains(joined, "1 more failed") {
+		t.Fatalf("overflow row missing:\n%s", joined)
+	}
+	if !strings.Contains(joined, "Headline 0") {
+		t.Fatalf("no article row survived:\n%s", joined)
+	}
+	if strings.Contains(joined, "Headline 19") {
+		t.Fatalf("articles should yield height to failures:\n%s", joined)
 	}
 }

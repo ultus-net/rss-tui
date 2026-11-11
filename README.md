@@ -68,12 +68,14 @@ rss-tui · 14:02 · 3 new · 12 unread · 4 feeds · refresh 10m
 | --- | --- |
 | `j` / `↓` | Next article, or scroll the preview when it has focus |
 | `k` / `↑` | Previous article, or scroll the preview |
+| `n` / `N` | Next / previous unread article |
 | `g` / `G` | First / last article (or top / bottom of preview) |
 | `Ctrl+d` / `Ctrl+u` | Half page down / up (also `PgDn` / `PgUp`) |
 | `h` / `l` | Focus list / preview pane (also `←` / `→`) |
 | `Enter` | Open the preview and mark the article read; `Enter` again or `Esc` returns to the list |
 | `Space` | Toggle read / unread without leaving the list |
 | `o` | Open the article link in the configured browser |
+| `y` / `Y` | Copy the link / copy a markdown link to the terminal clipboard |
 | `r` | Refresh every feed now |
 | `u` | Toggle All / Unread-only filter |
 | `/` | Live fuzzy search over visible headlines |
@@ -81,13 +83,18 @@ rss-tui · 14:02 · 3 new · 12 unread · 4 feeds · refresh 10m
 | `c` | Cycle category filter: All → each category → All |
 | `t` | Cycle colour theme; the choice is remembered |
 | `Tab` | Force single-pane mode at any width |
-| `e` | Show feed error details from the last poll |
+| `F` | Feed health: counts, last poll, and last error per feed |
+| `e` | Show feed error details, including errors from earlier runs |
 | `?` | Help overlay (any key closes it) |
 | `q` / `Ctrl+c` | Quit |
 
 Search: typing filters as you type, `Enter` keeps the filter, `Esc` clears it.
 Under the unread-only filter an article you just read stays visible until the
 next refresh, so the cursor does not jump out from under you.
+
+`y` and `Y` use OSC 52, so the clipboard works inside tmux and over SSH. In
+tmux, enable `set -g set-clipboard on` for the sequence to reach the outer
+terminal. Terminals without clipboard support ignore it silently.
 
 ## Layout
 
@@ -107,6 +114,7 @@ per_feed_timeout: 20s        # 1s .. 5m
 concurrent_fetches: 6        # 1 .. 32
 max_articles_per_feed: 100   # cache bound per feed
 passive_items: 20            # headlines shown by --passive
+passive_unread_only: false   # hide read headlines in --passive
 
 theme: catppuccin-mocha
 browser: ""                  # empty = xdg-open / open
@@ -129,8 +137,33 @@ feeds:
   browsers release the TUI, run in the terminal, and return cleanly.
 - `concurrent_fetches` feeds are in flight at once. Each feed gets its own
   timeout.
+- rss-tui stores each feed's `ETag` and `Last-Modified` and replays them. A feed
+  that answers `304 Not Modified` costs one small response and no parse.
 - Removing a feed from config drops its cached articles and read state on the
   next start. The config file is the source of truth for subscriptions.
+
+### OPML import and export
+
+Move subscriptions to or from any other feed reader:
+
+```sh
+# Write every configured feed to stdout, grouped by category.
+rss-tui export-opml > subscriptions.opml
+rss-tui export-opml -o subscriptions.opml
+
+# Merge a subscriptions.opml into config.yaml, keeping existing feeds.
+rss-tui import-opml subscriptions.opml
+
+# Replace the feed list with the file's contents.
+rss-tui import-opml --replace subscriptions.opml
+```
+
+Import merges by URL, skips feeds that are already configured, and reports the
+counts. It writes `config.yaml.bak` first and replaces the config atomically, so
+an interrupted import cannot truncate it. Nested OPML outlines become
+categories, and both the `xmlUrl` and `xmlurl` spellings are accepted. Replaced
+feeds lose their cached articles on the next start, because config is the source
+of truth.
 
 ### Themes
 
@@ -180,11 +213,14 @@ open.
 
 ## How it works
 
-- `internal/config` loads YAML, applies defaults, validates ranges and URLs, and
-  writes the sample on first run.
+- `internal/config` loads YAML, applies defaults, validates ranges and URLs,
+  writes the sample on first run, and merges or saves configs for OPML import.
 - `internal/feed` runs a bounded goroutine pool. Each feed gets
-  `context.WithTimeout`, a custom User-Agent, and an 8 MiB body cap. Parsed HTML
-  becomes markdown through `html-to-markdown`, then plain text for the preview.
+  `context.WithTimeout`, a custom User-Agent, an 8 MiB body cap, and cached
+  cache validators. Parsed HTML becomes markdown through `html-to-markdown`,
+  then plain text for the preview.
+- `internal/opml` reads and writes the subscription format, one nesting level
+  per category.
 - `internal/store` owns SQLite. Articles upsert on `(feed_id, guid)`, so a
   re-fetch never resets read state. Pruning keeps the newest N per feed.
 - `internal/ui` holds both front ends. The interactive model owns filters,
@@ -196,9 +232,11 @@ open.
 
 Feed failures are isolated: a timeout or HTTP error marks that feed failed, the
 other feeds still land, and the status bar shows a warning with details under
-`e`. Every poll retries. There is no dead-letter queue because feeds are
-read-only and idempotent. Cache writes happen in one SQLite transaction per
-feed; a failed write is surfaced in the status bar and the next poll retries.
+`e`. Errors are stored per feed, so they are still there after a restart and in
+the `F` health view. Every poll retries. There is no dead-letter queue because
+feeds are read-only and idempotent. Cache writes happen in one SQLite
+transaction per feed; a failed write is surfaced in the status bar and the next
+poll retries.
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the design decisions, schema, and
 refresh sequence.
@@ -216,10 +254,10 @@ gofmt -l ./cmd ./internal   # empty when formatted
 
 ## Limitations
 
-- No OPML import or export.
 - No article images, only text.
+- No full-text search over article bodies; `/` matches headlines and feed names.
 - Passive mode polls at `refresh_interval`; it does not stream.
-- `--once` is the cron-shaped entry point, not a daemon.
+- `--once` is a cron-shaped entry point, not a daemon.
 - Windows builds compile, but only Linux and macOS are smoke-tested.
 
 ## Licence
