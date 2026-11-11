@@ -850,3 +850,234 @@ func TestSettingsSaveErrorFlashes(t *testing.T) {
 		t.Fatalf("save error did not flash: %q", m.status)
 	}
 }
+
+func mousePress(x, y int) tea.MouseMsg {
+	return tea.MouseMsg{X: x, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}
+}
+
+func mouseWheel(x, y int, button tea.MouseButton) tea.MouseMsg {
+	return tea.MouseMsg{X: x, Y: y, Action: tea.MouseActionPress, Button: button}
+}
+
+// withArticles returns m with n extra cloned articles so the list scrolls.
+func withArticles(m Model, n int) Model {
+	base := append([]store.Article(nil), m.articles...)
+	for i := 0; i < n; i++ {
+		a := base[i%len(base)]
+		a.ID = int64(100 + i)
+		a.Title = fmt.Sprintf("Article %02d", i)
+		m.articles = append(m.articles, a)
+	}
+	m.recompute()
+	return m
+}
+
+func TestMouseClickMapsVisibleRow(t *testing.T) {
+	m := withArticles(testModel(120, 30), 30)
+	m.offset = 2
+	m.cursor = 0
+
+	model, _ := m.Update(mousePress(4, 3))
+	m = model.(Model)
+	if m.focus != focusList || m.cursor != 2 {
+		t.Fatalf("first row click: focus=%v cursor=%d", m.focus, m.cursor)
+	}
+
+	model, _ = m.Update(mousePress(4, 5))
+	m = model.(Model)
+	if m.cursor != 4 {
+		t.Fatalf("third row click cursor=%d", m.cursor)
+	}
+}
+
+func TestMouseClickOutsideRowsKeepsCursor(t *testing.T) {
+	m := withArticles(testModel(120, 30), 30)
+	m.cursor = 6
+
+	for _, y := range []int{0, 1, 2, m.paneHeight() - 1, m.height - 1} {
+		model, _ := m.Update(mousePress(4, y))
+		m = model.(Model)
+		if m.cursor != 6 {
+			t.Fatalf("y=%d moved cursor to %d", y, m.cursor)
+		}
+	}
+}
+
+func TestMouseClickPreviewFocusesPreview(t *testing.T) {
+	m := testModel(120, 30)
+	model, _ := m.Update(mousePress(m.leftWidth()+2, 5))
+	m = model.(Model)
+	if m.focus != focusPreview {
+		t.Fatalf("preview click focus=%v", m.focus)
+	}
+	if m.cursor != 0 {
+		t.Fatalf("preview click moved cursor to %d", m.cursor)
+	}
+}
+
+func TestMouseClickStatusBarIsIgnored(t *testing.T) {
+	m := testModel(120, 30)
+	m.focus = focusPreview
+	model, _ := m.Update(mousePress(4, m.height-1))
+	m = model.(Model)
+	if m.focus != focusPreview {
+		t.Fatalf("status click changed focus to %v", m.focus)
+	}
+}
+
+func TestMouseClickIgnoredWhileOverlayOpen(t *testing.T) {
+	m := withArticles(testModel(120, 30), 10)
+	m.overlay = overlayHelp
+	m.cursor = 0
+	model, _ := m.Update(mousePress(4, 6))
+	m = model.(Model)
+	if m.cursor != 0 {
+		t.Fatalf("overlay click moved cursor to %d", m.cursor)
+	}
+}
+
+func TestMouseWheelScrollsFocusedPane(t *testing.T) {
+	m := testModel(120, 30)
+	m.focus = focusList
+	m.cursor = 0
+
+	model, _ := m.Update(mouseWheel(4, 4, tea.MouseButtonWheelUp))
+	m = model.(Model)
+	if m.cursor != 0 {
+		t.Fatalf("wheel up at the top moved cursor to %d", m.cursor)
+	}
+
+	model, _ = m.Update(mouseWheel(4, 4, tea.MouseButtonWheelDown))
+	m = model.(Model)
+	if m.cursor != len(m.visible)-1 {
+		t.Fatalf("wheel down cursor=%d, want %d", m.cursor, len(m.visible)-1)
+	}
+
+	m.articles[0].Content = strings.Repeat("Long body text. ", 800)
+	m.recompute()
+	m.preview = &previewCache{}
+	m.focus = focusPreview
+	m.cursor = 0
+	m.previewScroll = 0
+	model, _ = m.Update(mouseWheel(4, 4, tea.MouseButtonWheelDown))
+	m = model.(Model)
+	if m.previewScroll == 0 {
+		t.Fatal("wheel down did not scroll the preview")
+	}
+	before := m.previewScroll
+	model, _ = m.Update(mouseWheel(4, 4, tea.MouseButtonWheelUp))
+	m = model.(Model)
+	if m.previewScroll >= before {
+		t.Fatalf("wheel up did not scroll back: %d -> %d", before, m.previewScroll)
+	}
+}
+
+func TestMouseDoubleClickOpensArticle(t *testing.T) {
+	m := testModel(120, 30)
+	if m.articles[0].Read {
+		t.Fatal("fixture article should start unread")
+	}
+
+	model, _ := m.Update(mousePress(4, 3))
+	m = model.(Model)
+	if m.focus != focusList {
+		t.Fatalf("single click opened the preview: focus=%v", m.focus)
+	}
+
+	model, cmd := m.Update(mousePress(4, 3))
+	m = model.(Model)
+	if m.focus != focusPreview {
+		t.Fatalf("double click did not open the preview: focus=%v", m.focus)
+	}
+	if cmd == nil {
+		t.Fatal("opening an unread article should schedule a mark-read")
+	}
+	if m.previewScroll != 0 {
+		t.Fatalf("previewScroll = %d", m.previewScroll)
+	}
+}
+
+func TestMouseDoubleClickOnHeaderKeepsList(t *testing.T) {
+	m := testModel(120, 30)
+	m.cursor = 2
+	for i := 0; i < 2; i++ {
+		model, _ := m.Update(mousePress(4, 1))
+		m = model.(Model)
+	}
+	if m.focus != focusList {
+		t.Fatalf("header double click opened the preview: focus=%v", m.focus)
+	}
+	if m.cursor != 2 {
+		t.Fatalf("header click moved cursor to %d", m.cursor)
+	}
+}
+
+func TestMouseClickOutsideColumnsKeepsCursor(t *testing.T) {
+	m := testModel(120, 30)
+	m.cursor = 1
+	for _, x := range []int{-1, m.width, m.width + 5} {
+		model, _ := m.Update(mousePress(x, 4))
+		m = model.(Model)
+		if m.cursor != 1 {
+			t.Fatalf("x=%d moved cursor to %d", x, m.cursor)
+		}
+	}
+}
+
+func TestMouseDoubleClickAfterScrollOpensClickedRow(t *testing.T) {
+	m := withArticles(testModel(120, 30), 30)
+	m.offset = 2
+	m.cursor = 0
+
+	// y=5 is the third visible row, which is article index offset+2.
+	model, _ := m.Update(mousePress(4, 5))
+	m = model.(Model)
+	if m.cursor != 4 {
+		t.Fatalf("first click cursor=%d, want 4", m.cursor)
+	}
+	model, _ = m.Update(mousePress(4, 5))
+	m = model.(Model)
+	if m.focus != focusPreview {
+		t.Fatalf("scrolled double click did not open: focus=%v", m.focus)
+	}
+	if m.cursor != 4 {
+		t.Fatalf("double click moved cursor to %d", m.cursor)
+	}
+}
+
+func TestMouseDoubleClickWindowExpires(t *testing.T) {
+	m := testModel(120, 30)
+	model, _ := m.Update(mousePress(4, 3))
+	m = model.(Model)
+	m.lastClick = time.Now().Add(-doubleClickWindow - time.Millisecond)
+
+	model, _ = m.Update(mousePress(4, 3))
+	m = model.(Model)
+	if m.focus != focusList {
+		t.Fatalf("a stale second click opened the preview: focus=%v", m.focus)
+	}
+}
+
+func TestMouseSinglePaneClickSelectsVisibleList(t *testing.T) {
+	m := withArticles(testModel(80, 24), 10)
+	if !m.singlePane() {
+		t.Fatal("80 columns should be single pane")
+	}
+	model, _ := m.Update(mousePress(10, 4))
+	m = model.(Model)
+	if m.focus != focusList || m.cursor != 1 {
+		t.Fatalf("single-pane click: focus=%v cursor=%d", m.focus, m.cursor)
+	}
+
+	m.articles = m.articles[:1]
+	m.recompute()
+	m.focus = focusPreview
+	model, _ = m.Update(mousePress(10, 4))
+	m = model.(Model)
+	if m.cursor != 0 {
+		t.Fatalf("preview click selected a row: cursor=%d", m.cursor)
+	}
+	if m.focus != focusPreview {
+		t.Fatalf("single-pane preview click changed focus to %v", m.focus)
+	}
+}

@@ -153,6 +153,11 @@ meta(key PRIMARY KEY, value)
   at once and is saved on the spot, so leaving the menu never reverts it. Passive
   rows only affect the next `--passive` run, and the new interval arms the next
   tick rather than cancelling the pending one.
+- Mouse events use the same pane geometry the renderer uses. A list click maps
+  to `offset + y - 3` (border, header, blank), so it stays correct after a
+  scroll; a click in the preview's columns focuses the preview. The wheel
+  scrolls the focused pane, three rows per notch. A second click on the same
+  cell within 400ms opens the article, which is `Enter`.
 
 ## Rendering and terminal safety
 
@@ -226,6 +231,8 @@ once.
   payload, feed-health overlay, persisted-error seeding, passive block width and
   height caps with reserved failure rows, redraw cursor arithmetic, and a
   settings menu that changes the live model and reloads the same values from a
-  temporary config file.
+  temporary config file, plus mouse mapping for row selection after a scroll,
+  preview focus, ignored clicks outside the rows, wheel clamping, and double
+  click opening.
 - Theme: every palette fills every role with a valid hex colour, cycle order in
   both directions, and a legacy `meta.theme` adopted into the YAML once.

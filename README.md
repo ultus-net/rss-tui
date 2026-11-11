@@ -110,6 +110,11 @@ the source of truth. Stars are local: they are not published back to the feed.
 tmux, enable `set -g set-clipboard on` for the sequence to reach the outer
 terminal. Terminals without clipboard support ignore it silently.
 
+Mouse: a click selects the row under the pointer and focuses the list, a click
+on the preview focuses the preview, and a double click opens the article the way
+`Enter` does. The wheel scrolls the pane that has focus, three rows per notch.
+Terminals that do not report mouse events keep working unmodified.
+
 ## Layout
 
 At 100 columns or wider the list and preview sit side by side. Narrower

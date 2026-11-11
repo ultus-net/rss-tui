@@ -131,7 +131,7 @@ func run() error {
 	if os.Getenv("NO_COLOR") != "" || !term.IsTerminal(int(os.Stdout.Fd())) {
 		lipgloss.SetColorProfile(termenv.Ascii)
 	}
-	program := tea.NewProgram(ui.New(deps), tea.WithAltScreen())
+	program := tea.NewProgram(ui.New(deps), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err = program.Run()
 	return err
 }
