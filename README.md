@@ -10,7 +10,7 @@ the last poll survive restarts.
 
 ## Status
 
-Working v0.3. CI runs gofmt, `go vet`, the tests, the race detector, and a
+Working v0.4. CI runs gofmt, `go vet`, the tests, the race detector, and a
 build on every pull request. The interactive UI and passive mode were
 smoke-tested in tmux against live feeds.
 
