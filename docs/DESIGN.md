@@ -136,8 +136,8 @@ meta(key PRIMARY KEY, value)
 
 - Focus chooses whether `j`/`k` moves the selection or scrolls the article.
 - `Enter` marks read on first open. `Space` toggles read in place.
-- Filters (`u`, `/`, `c`) rebuild the visible slice and reset the cursor to the
-  top; a reload preserves the selected article by ID.
+- Filters (`u`, `S`, `/`, `c`) rebuild the visible slice and reset the cursor to
+  the top; a reload preserves the selected article by ID.
 - Marking read does not remove the row from a live unread-only view. The next
   reload does. This avoids a cursor jump while reading.
 - Layout answers one question: `single := width < 100 || manualSingle`. There is
@@ -158,6 +158,9 @@ meta(key PRIMARY KEY, value)
   does not re-wrap 20k characters per keystroke.
 - Palette roles are the only colours the UI knows. No view hard-codes a hex
   value.
+- A list row is read marker, read dot, headline, gap, compact age, and feed tag.
+  The age drops below 60 columns so the headline and feed keep the space. A star
+  marker rides inside the headline budget, so it truncates like the title.
 
 ## Passive redraw protocol
 

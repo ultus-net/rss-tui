@@ -6,6 +6,12 @@ All notable changes to rss-tui are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The article list shows a compact age stamp (`5m`, `3h`, `2d`, `2 Jan`) between
+  the headline and the feed tag. It hides below 60 columns so the headline keeps
+  the space. The preview keeps its verbose relative time.
+
 ## [0.3.0] - 2026-11-12
 
 ### Added

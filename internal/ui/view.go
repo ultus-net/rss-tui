@@ -512,6 +512,10 @@ func (m Model) emptyText() string {
 	}
 }
 
+// rowAgeMinWidth is the narrowest row that still shows the age stamp. Below it
+// the feed tag and headline keep the space.
+const rowAgeMinWidth = 60
+
 func renderRow(a store.Article, width int, selected bool, st styles) string {
 	if width <= 0 {
 		return ""
@@ -541,7 +545,15 @@ func renderRow(a store.Article, width int, selected bool, st styles) string {
 	if tagW > 0 {
 		tag = textutil.Truncate(a.FeedTitle, tagW)
 	}
+	age := ""
+	if width >= rowAgeMinWidth {
+		age = textutil.Age(a.Published, time.Now())
+	}
+	ageW := textutil.Width(age)
 	titleW := width - 5 - textutil.Width(tag)
+	if ageW > 0 {
+		titleW -= ageW + 1
+	}
 	if titleW < 4 {
 		titleW = 4
 	}
@@ -550,6 +562,9 @@ func renderRow(a store.Article, width int, selected bool, st styles) string {
 		title = textutil.Truncate("★ "+a.Title, titleW)
 	}
 	gap := width - 4 - textutil.Width(title) - textutil.Width(tag)
+	if ageW > 0 {
+		gap -= ageW + 1
+	}
 	if gap < 1 {
 		gap = 1
 	}
@@ -558,8 +573,11 @@ func renderRow(a store.Article, width int, selected bool, st styles) string {
 	line := st.rowMarker(selected).Render(marker) + sep +
 		st.rowDot(a.Read, selected).Render(dot) + sep +
 		st.rowTitle(a.Read, selected).Render(title) +
-		fill.Render(strings.Repeat(" ", gap)) +
-		st.rowTag(selected).Render(tag)
+		fill.Render(strings.Repeat(" ", gap))
+	if age != "" {
+		line += st.rowAge(a.Read, selected).Render(age) + fill.Render(" ")
+	}
+	line += st.rowTag(selected).Render(tag)
 	if used := ansi.StringWidth(line); used < width {
 		line += fill.Render(strings.Repeat(" ", width-used))
 	}

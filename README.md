@@ -116,6 +116,10 @@ terminals, including small tmux panes, collapse to a single pane: `Enter` opens
 the article full-width and `Esc` returns to the list. `Tab` forces single-pane
 mode on a wide terminal.
 
+A list row shows read state, the headline, a compact age stamp (`5m`, `3h`, `2d`,
+`2 Jan`), and the feed. The age hides below 60 columns so the headline keeps the
+space.
+
 ## Configuration
 
 Config lives at `~/.config/rss-tui/config.yaml` (respects `XDG_CONFIG_HOME`).

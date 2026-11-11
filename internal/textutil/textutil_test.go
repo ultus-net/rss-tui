@@ -101,6 +101,27 @@ func TestRelativeTime(t *testing.T) {
 	}
 }
 
+func TestAge(t *testing.T) {
+	now := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		at   time.Time
+		want string
+	}{
+		{now.Add(-10 * time.Second), "now"},
+		{now.Add(-5 * time.Minute), "5m"},
+		{now.Add(-3 * time.Hour), "3h"},
+		{now.Add(-48 * time.Hour), "2d"},
+		{time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC), "2 Jan"},
+		{time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC), "2 Jan 24"},
+		{time.Time{}, ""},
+	}
+	for _, c := range cases {
+		if got := Age(c.at, now); got != c.want {
+			t.Fatalf("Age(%s) = %q, want %q", c.at, got, c.want)
+		}
+	}
+}
+
 func TestClock(t *testing.T) {
 	at := time.Date(2026, 11, 12, 9, 5, 0, 0, time.Local)
 	if got := Clock(at); got != "09:05" {
