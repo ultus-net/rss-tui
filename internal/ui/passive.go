@@ -138,6 +138,9 @@ func RunPassive(ctx context.Context, deps Deps, opts PassiveOptions) error {
 		if once {
 			return nil
 		}
+		// This cycle is already rendered above, so cancelling during the wait
+		// drops nothing. Cancelling mid-fetch abandons the in-flight fetch
+		// because the process is leaving.
 		select {
 		case <-ctx.Done():
 			return nil

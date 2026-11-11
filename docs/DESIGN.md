@@ -144,7 +144,10 @@ trigger a wrap and desynchronise the cursor arithmetic.
 The block is capped at `height - 1` lines so a tall block cannot scroll the
 terminal out from under the cursor. When a redraw shrinks the block, the extra
 rows are cleared in the same pass, so no stale headline can survive below it.
-`Finish` only moves to a clean line on exit; it never erases the final block. `SIGINT`/`SIGTERM` cancel the poll context
+`Finish` only moves to a clean line on exit; it never erases the final block.
+Each cycle renders before it waits, so a cancellation during the wait drops no
+rendered update. A cancellation during a fetch abandons that in-flight fetch
+because the process is leaving. `SIGINT`/`SIGTERM` cancel the poll context
 and leave a clean line. Non-TTY output skips every escape sequence and prints
 once.
 
